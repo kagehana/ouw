@@ -3378,16 +3378,18 @@ function CARDS.score(c, events)
     -- it took Second Wind over Fair Fight at full health). Below Fortune and
     -- damage, which the user put first. Hurt, Second Wind still wins above.
     if m then return 2500 + m end
-    -- Flat points (Fine Trophy +150, Greater Trophy +375, one worth 1500...):
-    -- above Second Wind, the most points first (requested). Fortune stays
-    -- above them - it scales with the points already held. Known by its text
-    -- ("Points added straight to your score") or a Trophy title, in case the
-    -- description is not there.
+    -- Flat points. Five tiers, read off Rewards.Score.Points: Trophy,
+    -- Fine, Greater, Grand, Supreme = 5/10/25/50/100 kills at 15 = 75, 150,
+    -- 375, 750, 1500. Only GRAND and SUPREME rank above Second Wind
+    -- (requested); the rest are a last resort. Fortune stays above all of
+    -- them - it scales with the points already held. The most points first.
     n = t:match('%+(%d+)$')
-    if n and (c.desc:find('[Pp]oints') or t:find('Trophy', 1, true)) then
-        return 2000 + 1 + min(tonumber(n), 99999) / 1e5
+    local pts = n and (c.desc:find('[Pp]oints') or t:find('Trophy', 1, true)) and tonumber(n)
+    if pts and (t:find('^Grand Trophy') or t:find('^Supreme Trophy')) then
+        return 2000 + 1 + min(pts, 99999) / 1e5
     end
     if t == 'Second Wind' then return 2000 end
+    if pts then return 500 + min(pts, 99999) / 1e5 end
     return 100
 end
 
