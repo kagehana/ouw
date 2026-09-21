@@ -49,30 +49,34 @@ local BLACK = Color3.new(0, 0, 0)
 -- so an on default would invert its pill for the whole session.
 -- Markers fade IN with distance, so anything close stays out of the way. One
 -- band for every category; a category may still override it.
-local FADE_IN  = 120
-local FADE_OUT = 350
+-- One table rather than twenty locals: the top level sits at Luau's
+-- 200-local ceiling, and an executor compiling without optimisation (Volt)
+-- does not fold constant locals away, so it hit that ceiling where Real did not.
+local K = {}
+K.FADE_IN  = 120
+K.FADE_OUT = 350
 
 local CFG = {
     Boss = {
         on = false, showName = false, showDist = false,
         tag = '(boss)', px = 14, color = WHITE, z = 40, weight = 0.2,
-        fadeIn = FADE_IN, fadeOut = FADE_OUT,
+        fadeIn = K.FADE_IN, fadeOut = K.FADE_OUT,
     },
     -- interactable NPCs: shopkeepers, trainers, quest givers
     Npc = {
         on = false, showName = false, showDist = false,
         tag = '(npc)', px = 13, color = WHITE, z = 35, weight = 0.4,
-        fadeIn = FADE_IN, fadeOut = FADE_OUT,
+        fadeIn = K.FADE_IN, fadeOut = K.FADE_OUT,
     },
     Player = {
         on = false, showName = false, showDist = false,
         tag = '(plr)', px = 13, color = WHITE, z = 30, weight = 0.5,
-        fadeIn = FADE_IN, fadeOut = FADE_OUT,
+        fadeIn = K.FADE_IN, fadeOut = K.FADE_OUT,
     },
     Mob = {
         on = false, showName = false, showDist = false,
         tag = '(mob)', px = 13, color = WHITE, z = 20, weight = 1,
-        fadeIn = FADE_IN, fadeOut = FADE_OUT,
+        fadeIn = K.FADE_IN, fadeOut = K.FADE_OUT,
     },
     -- Places are static points, not instances, and they sit kilometres apart,
     -- so they get their own much wider fade band.
@@ -84,7 +88,7 @@ local CFG = {
     Object = {
         on = false, showName = false, showDist = false,
         tag = '(obj)', px = 13, color = WHITE, z = 10, weight = 1.5,
-        fadeIn = FADE_IN, fadeOut = FADE_OUT,
+        fadeIn = K.FADE_IN, fadeOut = K.FADE_OUT,
     },
 }
 local ORDER  = { 'Boss', 'Npc', 'Player', 'Mob', 'Object', 'Place' }
@@ -107,24 +111,24 @@ local PROMPT_ROUTES = {}   -- optional ActionText -> category override
 -- cannot express (a condensed face at Bold), and the legacy Arial the enum
 -- gives renders 218x24 for a name that RobotoCondensed Bold draws in 123x16 at
 -- the same TextSize, which is what made long names collide.
-local FONT_FAMILY = 'RobotoCondensed'
-local FONT_WEIGHT = Enum.FontWeight.Bold
-local FONT_LEGACY = Enum.Font.GothamBold   -- if FontFace is unavailable
-local T_REF    = 19      -- name size at T_DIST studs, scaled by distance
-local T_DIST   = 100
-local T_MIN    = 15
-local T_MAX    = 34
-local GAP      = 3       -- name gap above the tag
-local Y_OFF    = 4
-local STROKE_T = 0.7     -- outline on name and tag: 1 = off, 0 = solid
-local D_COLOR  = '#9A9A9A'
-local D_SCALE  = 0.72    -- distance size relative to the name
-local D_SEP    = '  '
-local CULL     = 160     -- off-screen slack before a marker is hidden
-local RELEASE  = 3       -- seconds hidden before a widget returns to the pool
-local SWEEP    = 1
-local UI_KEY   = Enum.KeyCode.RightShift
-local SEOUL    = 'https://github.com/kagehana/seoul/blob/main/seoul.lua?raw=true'
+K.FONT_FAMILY = 'RobotoCondensed'
+K.FONT_WEIGHT = Enum.FontWeight.Bold
+K.FONT_LEGACY = Enum.Font.GothamBold   -- if FontFace is unavailable
+K.T_REF    = 19      -- name size at T_DIST studs, scaled by distance
+K.T_DIST   = 100
+K.T_MIN    = 15
+K.T_MAX    = 34
+K.GAP      = 3       -- name gap above the tag
+K.Y_OFF    = 4
+K.STROKE_T = 0.7     -- outline on name and tag: 1 = off, 0 = solid
+K.D_COLOR  = '#9A9A9A'
+K.D_SCALE  = 0.72    -- distance size relative to the name
+K.D_SEP    = '  '
+K.CULL     = 160     -- off-screen slack before a marker is hidden
+K.RELEASE  = 3       -- seconds hidden before a widget returns to the pool
+K.SWEEP    = 1
+K.UI_KEY   = Enum.KeyCode.RightShift
+K.SEOUL    = 'https://github.com/kagehana/seoul/blob/main/seoul.lua?raw=true'
 
 local floor, clamp, max, min, abs = math.floor, math.clamp, math.max, math.min, math.abs
 local fmt, fromOffset, clock = string.format, UDim2.fromOffset, os.clock
@@ -253,9 +257,9 @@ local function newWidget()
         -- fall back to the enum on any client without FontFace
         if not pcall(function()
             t.FontFace = Font.new(
-                'rbxasset://fonts/families/' .. FONT_FAMILY .. '.json', FONT_WEIGHT)
+                'rbxasset://fonts/families/' .. K.FONT_FAMILY .. '.json', K.FONT_WEIGHT)
         end) then
-            t.Font = FONT_LEGACY
+            t.Font = K.FONT_LEGACY
         end
         t.Parent                 = root
         return t
@@ -465,13 +469,13 @@ local function draw(d, c, minX, maxX, minY, maxY)
     if px ~= w.px then
         w.px = px
         w.tag.TextSize   = px
-        w.label.Position = fromOffset(0, -GAP - floor(px * 0.5))
+        w.label.Position = fromOffset(0, -K.GAP - floor(px * 0.5))
     end
     if c.tag ~= w.tagText then w.tagText, w.tag.Text = c.tag, c.tag end
     -- equal ZIndex falls back to child order, which is arbitrary with a pool
     if c.z ~= w.z then w.z, w.root.ZIndex = c.z, c.z end
 
-    local ix, iy = floor(x + 0.5), floor(y + 0.5) + Y_OFF
+    local ix, iy = floor(x + 0.5), floor(y + 0.5) + K.Y_OFF
     if ix ~= w.x or iy ~= w.y then
         w.x, w.y = ix, iy
         w.root.Position = fromOffset(ix, iy)
@@ -490,23 +494,23 @@ local function draw(d, c, minX, maxX, minY, maxY)
     end
     if a ~= w.alpha then
         w.alpha = a
-        local t, st = 1 - a, 1 - a * (1 - STROKE_T)
+        local t, st = 1 - a, 1 - a * (1 - K.STROKE_T)
         w.tag.TextTransparency,       w.label.TextTransparency       = t, t
         w.tag.TextStrokeTransparency, w.label.TextStrokeTransparency = st, st
     end
 
-    local size = floor(clamp(T_REF * T_DIST / dist, T_MIN, T_MAX))
+    local size = floor(clamp(K.T_REF * K.T_DIST / dist, K.T_MIN, K.T_MAX))
     if size ~= w.size then w.size, w.label.TextSize = size, size end
 
     local sn, sd = c.showName == true, c.showDist == true
     if sn or sd then
-        local m, dpx = floor(dist), max(1, floor(size * D_SCALE))
+        local m, dpx = floor(dist), max(1, floor(size * K.D_SCALE))
         if m ~= w.d or dpx ~= w.dpx or d.name ~= w.nm or sn ~= w.sn or sd ~= w.sd then
             w.d, w.dpx, w.nm, w.sn, w.sd = m, dpx, d.name, sn, sd
             local head = sn and d.name or ''
             w.label.Text = sd
                 and fmt('%s<font color="%s" size="%d">%s%d</font>',
-                        head, D_COLOR, dpx, head ~= '' and D_SEP or '', m)
+                        head, K.D_COLOR, dpx, head ~= '' and K.D_SEP or '', m)
                 or head
         end
         if not w.labelOn then w.labelOn, w.label.Visible = true, true end
@@ -777,17 +781,17 @@ local FARM_STATE    = { engaged = false, target = nil, retreated = false,
                         evading = false, looting = false, looted = 0,
                         preset = nil, why = 'off', key = nil, reach = nil,
                         want = nil, probing = false, skill = nil }
-local farmEvadeUntil, farmHardStop = 0, 0
+-- Probe and dodge state on one table, not eight locals: the top level is at
+-- Luau's 200-local ceiling when compiled without optimisation (Volt).
+local FP = { evadeUntil = 0, hardStop = 0, reach = nil, probeAt = 0, lastHp = nil,
+    probeSwings = 0, probing = false, base = nil }
 -- Adaptive reach. `farmReach` is the offset in use for the CURRENT target;
 -- REACH_CACHE remembers, per rig name, the one that was seen to connect.
 -- `farmProbing` is whether THIS target is one the probe may move at all -
 -- see FARM.probeNames. A rig that is not on that list sits at FARM.under for
 -- the whole engagement and never banks anything.
 local REACH_CACHE = {}
-local farmReach, farmProbeAt, farmLastHp = nil, 0, nil
-local farmProbeSwings = 0
-local farmProbing = false
-local farmBase   -- the FARM.under the current reach was seeded from, so that
+-- FP.base: the FARM.under the current reach was seeded from, so that
                  -- moving the slider mid-fight re-seeds instead of being
                  -- silently overridden by a probe that already stepped down
 -- Last frame the Heartbeat actually pinned us. The watchdog in the scan loop
@@ -801,9 +805,9 @@ local lootAnchor, lootAnchorAt = nil, 0
 local farmEvadeConns = {}
 -- weak keys: a marker destroyed mid-skill must not be pinned alive by this
 local farmMarkers    = setmetatable({}, { __mode = 'k' })
-local farmDd, farmBtn               -- menu elements, nil until the ui builds
-local farmLabels    = {}            -- label -> tracked key
-local farmSig       = ''            -- signature of the list last written
+--   FARM.dd, FARM.btn: menu elements, nil until the ui builds
+FARM.labels   = {}                  -- label -> tracked key
+FARM.sig      = ''                  -- signature of the list last written
 -- Resolved root per candidate, revalidated by Parent and re-resolved only when
 -- it dies. Weak keys so an untracked target does not pin its rig here.
 local farmRoots     = setmetatable({}, { __mode = 'k' })
@@ -850,7 +854,7 @@ local function farmPhase()
 end
 
 local function farmUnder()
-    return farmReach or FARM.under
+    return FP.reach or FARM.under
 end
 
 -- Is this rig one the reach probe is allowed to move? Name match, because the
@@ -961,13 +965,13 @@ local function farmWatchSkills(rig)
         local ok, is = pcall(farmTrigger, x)
         if not (ok and is) then return end
         local now = clock()
-        if now > farmEvadeUntil then farmHardStop = now + FARM.evadeMax end
+        if now > FP.evadeUntil then FP.hardStop = now + FARM.evadeMax end
         -- Both kinds hold the dodge, not just movers. A telegraphed AoE puts a
         -- big indicator part down showing where it will land and only resolves
         -- when that part goes away, so treating the part as a mere trigger
         -- brought us back mid-wind-up, straight into the hit.
         farmMarkers[x] = true
-        farmEvadeUntil = max(farmEvadeUntil, now + FARM.evadeMin)
+        FP.evadeUntil = max(FP.evadeUntil, now + FARM.evadeMin)
     end)
     farmEvadeConns[#farmEvadeConns + 1] = rig.DescendantRemoving:Connect(function(x)
         farmMarkers[x] = nil
@@ -985,13 +989,13 @@ local function farmEngage(rig, root, hum)
     -- Start from whatever worked on this kind of enemy last time, else the
     -- configured offset. Clamped, because the slider can move under us.
     -- Only a probable rig gets either: everything else holds the slider.
-    farmProbing = farmProbable(rig.Name)
-    FARM_STATE.probing = farmProbing
-    local want  = (farmProbing and REACH_CACHE[rig.Name]) or FARM.under
-    farmReach   = max(min(want, FARM.under), FARM.underMin)
-    farmBase    = FARM.under
-    farmProbeAt, farmProbeSwings = clock(), 0
-    farmLastHp  = hum and hum.Health or nil
+    FP.probing = farmProbable(rig.Name)
+    FARM_STATE.probing = FP.probing
+    local want  = (FP.probing and REACH_CACHE[rig.Name]) or FARM.under
+    FP.reach   = max(min(want, FARM.under), FARM.underMin)
+    FP.base    = FARM.under
+    FP.probeAt, FP.probeSwings = clock(), 0
+    FP.lastHp  = hum and hum.Health or nil
     farmEngaged        = true
     farmBeat           = clock()
     FARM_STATE.engaged = true
@@ -1013,7 +1017,7 @@ local function farmDisengage(goHome)
     for _, c in farmEvadeConns do pcall(function() c:Disconnect() end) end
     clear(farmEvadeConns)
     clear(farmMarkers)
-    farmEvadeUntil, farmHardStop = 0, 0
+    FP.evadeUntil, FP.hardStop = 0, 0
     FARM_STATE.evading = false
     -- A kill with loot wanted hands the body to the loot hold instead of
     -- going home: the chest spawns here, after the kill. A retreat, a switch-
@@ -1031,8 +1035,8 @@ local function farmDisengage(goHome)
         farmHrp.AssemblyLinearVelocity = ZERO
     end
     farmRig, farmRoot, farmHum = nil, nil, nil
-    farmReach, farmLastHp, farmBase = nil, nil, nil
-    farmProbing, FARM_STATE.probing = false, false
+    FP.reach, FP.lastHp, FP.base = nil, nil, nil
+    FP.probing, FARM_STATE.probing = false, false
 end
 
 -- Argument 2 is the SWING PRESET, not the constant it looks like. Unarmed it is
@@ -1234,7 +1238,7 @@ local function farmSwing(step, opener)
     local preset, d = farmPayload(step, opener)
     FARM_STATE.preset = preset
     FARM_STATE.swings = (FARM_STATE.swings or 0) + 1
-    farmProbeSwings += 1
+    FP.probeSwings += 1
     remote:FireServer('Combat_Service', preset, step, opener and true or false,
         d, false, nil)
 end
@@ -1243,7 +1247,7 @@ end
 -- scan. A boss folder is tracked from its BossInfo and stays tracked while the
 -- rig is despawned, which is exactly the entry you want to arm and wait on.
 local function farmRefresh()
-    if not farmDd then return end
+    if not FARM.dd then return end
 
     local origin = farmHrp and farmHrp.Parent and farmHrp.Position
     local rows, n = {}, 0
@@ -1286,22 +1290,22 @@ local function farmRefresh()
     -- to a single body that would be dead a minute later. A name is the right
     -- unit of choice, so duplicates collapse and the FIRST row wins - which,
     -- given the sort above, is the nearest spawned one.
-    clear(farmLabels)
+    clear(FARM.labels)
     local labels, seen = {}, {}
     for i = 1, n do
         local r = rows[i]
         if not seen[r.name] then
             seen[r.name] = true
             labels[#labels + 1] = r.name
-            farmLabels[r.name]  = r.key
+            FARM.labels[r.name]  = r.key
             if #labels >= FARM.cap then break end
         end
     end
 
     local sig = concat(labels, '\0')
-    if sig ~= farmSig then
-        farmSig = sig
-        farmDd:modify({ elements = labels })
+    if sig ~= FARM.sig then
+        FARM.sig = sig
+        FARM.dd:modify({ elements = labels })
     end
 end
 
@@ -1610,28 +1614,28 @@ local function farmStep()
         -- cover the edges, so with grace at 0 we come back on the very frame the
         -- mover dies rather than on any timer.
         if live and FARM.evadeGrace > 0 then
-            farmEvadeUntil = max(farmEvadeUntil, now + FARM.evadeGrace)
+            FP.evadeUntil = max(FP.evadeUntil, now + FARM.evadeGrace)
         end
         -- Disarm as it fires, so a spent stop is not re-tested and re-cleared
         -- on every later frame. Tidying only: the next marker re-arms it
         -- anyway, because a hard stop leaves farmEvadeUntil at 0.
-        if farmHardStop > 0 and now > farmHardStop then
-            farmHardStop   = 0
-            farmEvadeUntil = 0
+        if FP.hardStop > 0 and now > FP.hardStop then
+            FP.hardStop   = 0
+            FP.evadeUntil = 0
             clear(farmMarkers)
             live = false
         end
 
-        FARM_STATE.evading = live or now < farmEvadeUntil
+        FARM_STATE.evading = live or now < FP.evadeUntil
     else
         FARM_STATE.evading = false
     end
 
     -- The slider wins whatever the target is: a new configured offset moves
     -- the body now and restarts any search from there.
-    if farmReach and farmBase ~= FARM.under then
-        farmBase, farmReach = FARM.under, FARM.under
-        farmProbeAt, farmLastHp, farmProbeSwings = clock(), nil, 0
+    if FP.reach and FP.base ~= FARM.under then
+        FP.base, FP.reach = FARM.under, FARM.under
+        FP.probeAt, FP.lastHp, FP.probeSwings = clock(), nil, 0
     end
 
     -- Probe for reach, on the rigs that need it and on no others. A rig we
@@ -1641,22 +1645,22 @@ local function farmStep()
     -- `probe` window with nothing to show steps us in a stud. Only runs while
     -- actually swinging - a dodge parks us 37 studs out, and counting that as
     -- "out of reach" would walk the offset to the floor.
-    if farmProbing and not FARM_STATE.evading and farmHum and farmReach then
+    if FP.probing and not FARM_STATE.evading and farmHum and FP.reach then
         local hp = farmHum.Health
-        if farmLastHp and hp < farmLastHp - 0.01 then
+        if FP.lastHp and hp < FP.lastHp - 0.01 then
             -- it is landing from here: this is the distance worth keeping
-            REACH_CACHE[farmRig and farmRig.Name or '?'] = farmReach
-            farmProbeAt, farmProbeSwings = clock(), 0
-        elseif clock() - farmProbeAt > FARM.probe
-            and farmProbeSwings >= FARM.probeSwings then
-            if farmReach > FARM.underMin then
-                farmReach = max(FARM.underMin, farmReach - 1)
+            REACH_CACHE[farmRig and farmRig.Name or '?'] = FP.reach
+            FP.probeAt, FP.probeSwings = clock(), 0
+        elseif clock() - FP.probeAt > FARM.probe
+            and FP.probeSwings >= FARM.probeSwings then
+            if FP.reach > FARM.underMin then
+                FP.reach = max(FARM.underMin, FP.reach - 1)
             end
-            farmProbeAt, farmProbeSwings = clock(), 0
+            FP.probeAt, FP.probeSwings = clock(), 0
         end
-        farmLastHp = hp
+        FP.lastHp = hp
     end
-    FARM_STATE.reach = farmReach
+    FARM_STATE.reach = FP.reach
 
     -- Written every frame on purpose: gravity still pulls on the body, so
     -- skipping the write because the target has not moved makes us sink.
@@ -1984,10 +1988,10 @@ local TP = {
 }
 
 local tpDd, tpCatDd              -- menu elements, nil until the ui builds
-local tpLabels = {}              -- label -> tracked key
-local tpSig    = ''              -- signature of the list last written
+TP.labels = {}                   -- label -> tracked key
+TP.sig    = ''                   -- signature of the list last written
 local tpKey                      -- selected tracked key
-local tpToken  = 0               -- cancels a hold left over from an earlier jump
+TP.token  = 0                    -- cancels a hold left over from an earlier jump
 -- When the hold above stops re-writing our CFrame. Movement reads it: a jump
 -- that is still being held and a flight write are two owners of one property.
 local tpHoldUntil = 0
@@ -2079,15 +2083,15 @@ local function tpGo(dest)
     -- short, and it would undo any jump from the menu. A caller that wants to
     -- be parked at the destination sets FARM.park AFTER this call.
     FARM.park = nil
-    tpToken += 1
-    local token = tpToken
+    TP.token += 1
+    local token = TP.token
     tpHoldUntil = clock() + TP.hold
     hrp.CFrame                 = cf
     hrp.AssemblyLinearVelocity = ZERO
     if TP.hold > 0 then
         task.spawn(function()
             local deadline = clock() + TP.hold
-            while alive and tpToken == token and hrp.Parent and clock() < deadline do
+            while alive and TP.token == token and hrp.Parent and clock() < deadline do
                 hrp.CFrame                 = cf
                 hrp.AssemblyLinearVelocity = ZERO
                 task.wait()
@@ -2158,7 +2162,7 @@ local function tpRefresh()
     -- decides the ORDER but stays out of the label, so the list only churns when
     -- the set of targets changes rather than every time we move. Names repeat
     -- freely, so a bare name is not an address and duplicates take a suffix.
-    clear(tpLabels)
+    clear(TP.labels)
     local labels, used = {}, {}
     for i = 1, min(n, TP.cap) do
         local base     = rows[i].name
@@ -2169,12 +2173,12 @@ local function tpRefresh()
         end
         used[label]     = true
         labels[i]       = label
-        tpLabels[label] = rows[i].key
+        TP.labels[label] = rows[i].key
     end
 
     local sig = concat(labels, '\0')
-    if sig ~= tpSig then
-        tpSig = sig
+    if sig ~= TP.sig then
+        TP.sig = sig
         tpDd:modify({ elements = labels })
     end
 end
@@ -2669,9 +2673,9 @@ end)
 -- So this controller does not need to know anything about seals: the loot run
 -- already skips a disabled prompt and takes it the moment it enables. All that
 -- is left is find a camp, kill it, wait, move on.
-local raidIdx   = 0     -- position in the area tour
-local raidWait  = 0     -- clock() before which we do not travel again
-local raidFought = false
+RAID.idx   = 0     -- position in the area tour
+RAID.waitUntil  = 0     -- clock() before which we do not travel again
+RAID.fought = false
 
 -- A living camp mob: tracked as a Mob, and its FOLDER says it is temporary.
 -- Resolved here rather than from `d.anchor`, which the draw loop only maintains
@@ -2844,8 +2848,8 @@ local function raidPass()
             RAID_STATE.phase, RAID_STATE.area = 'off', nil
             -- hand the body back; the farm's own toggle decides what happens
             -- next, and we never wrote it
-            if farmKey and raidFought then farmWant, farmKey = nil, nil end
-            raidFought = false
+            if farmKey and RAID.fought then farmWant, farmKey = nil, nil end
+            RAID.fought = false
         end
         return
     end
@@ -2859,7 +2863,7 @@ local function raidPass()
         -- pins us to whatever it is given; feeding it the closest of the three
         -- is what makes it work through a camp.
         RAID_STATE.phase = 'fight'
-        raidFought = true
+        RAID.fought = true
         local best = mobs[1].key
         if RAID.wave then
             -- Waves keep arriving mid-fight, and nearest-first would drop a
@@ -2887,12 +2891,12 @@ local function raidPass()
         farmWant, farmKey = nil, nil
         if farmEngaged then farmDisengage(false) end
     end
-    if raidFought then
+    if RAID.fought then
         -- The camp just died. The seal breaks, the chest prompt enables and the
         -- loot run takes it - none of which is instant, so do not travel yet.
-        raidFought = false
+        RAID.fought = false
         RAID_STATE.cleared += 1
-        raidWait   = clock() + RAID.settle
+        RAID.waitUntil   = clock() + RAID.settle
         RAID.since = clock()
         RAID.loot  = FARM_STATE.looted
         RAID.seen  = FARM_STATE.looted
@@ -2908,9 +2912,9 @@ local function raidPass()
         RAID.seen, RAID.claimAt = FARM_STATE.looted, clock()
         -- a claim is proof the loot is still coming, so the cap restarts;
         -- it still ends, because it only moves on a claim that succeeded
-        if RAID.loot >= 0 then raidWait = max(raidWait, clock() + RAID.settle) end
+        if RAID.loot >= 0 then RAID.waitUntil = max(RAID.waitUntil, clock() + RAID.settle) end
     end
-    if clock() < raidWait or FARM_STATE.looting then
+    if clock() < RAID.waitUntil or FARM_STATE.looting then
         RAID_STATE.phase = 'looting'
         -- Two different waits end here, and each ends on its own evidence
         -- rather than on its cap.
@@ -2920,14 +2924,14 @@ local function raidPass()
                 -- replicating; one rig in range says they have. The camp check
                 -- above has already run this tick, so if there were a camp we
                 -- would be fighting it - move on.
-                if RAID.rigs(hrp.Position) then raidWait = 0 end
+                if RAID.rigs(hrp.Position) then RAID.waitUntil = 0 end
             elseif FARM_STATE.looted > RAID.loot
                 and clock() - RAID.claimAt >= RAID.after then
                 -- The chest the camp was guarding has been claimed, the last
                 -- claim has had its grace, and nothing claimable is left in
                 -- range - a drop between loot passes is not "done".
                 local left = lootScan()
-                if not (left and #left > 0) then raidWait = 0 end
+                if not (left and #left > 0) then RAID.waitUntil = 0 end
             end
         end
         return
@@ -2942,11 +2946,11 @@ local function raidPass()
         RAID_STATE.phase = 'nowhere to go'
         return
     end
-    raidIdx = raidIdx % #areas + 1
-    local a = areas[raidIdx]
+    RAID.idx = RAID.idx % #areas + 1
+    local a = areas[RAID.idx]
     RAID_STATE.phase, RAID_STATE.area = 'travel', a.name
     tpGo(a.point)
-    raidWait   = clock() + RAID.dwell
+    RAID.waitUntil   = clock() + RAID.dwell
     RAID.since = clock()
     -- Marks this wait as an ARRIVAL rather than a post-kill one. Without it the
     -- last camp's claim count is still sitting there, and every stop from then
@@ -3244,7 +3248,7 @@ function FARM.questAim()
     if name ~= farmWant then
         farmWant, farmKey = name, nil
         if farmEngaged then farmDisengage(true) end
-        if farmDd then farmDd:modify({ name = 'Target: ' .. name }) end
+        if FARM.dd then FARM.dd:modify({ name = 'Target: ' .. name }) end
         guard(farmTick)
     end
     -- The farm only sees rigs that have streamed in, and a quest's targets are
@@ -4086,8 +4090,8 @@ rc = Run.RenderStepped:Connect(function()
     local eye = cam.CFrame.Position
     local vp  = cam.ViewportSize
     local now = clock()
-    local minX, maxX = -CULL, vp.X + CULL
-    local minY, maxY = -CULL, vp.Y + CULL
+    local minX, maxX = -K.CULL, vp.X + K.CULL
+    local minY, maxY = -K.CULL, vp.Y + K.CULL
 
     -- pass one: filter and measure, no projection and no property writes
     clear(live)
@@ -4140,10 +4144,10 @@ rc = Run.RenderStepped:Connect(function()
         draw(d, CFG[d.cat], minX, maxX, minY, maxY)
     end
 
-    if now - sweep >= SWEEP then
+    if now - sweep >= K.SWEEP then
         sweep = now
         for _, d in tracked do
-            if d.w and d.since and now - d.since >= RELEASE then
+            if d.w and d.since and now - d.since >= K.RELEASE then
                 release(d.w)
                 d.w = nil
             end
@@ -4170,7 +4174,7 @@ local COLOURS = {
 }
 
 local function buildUi()
-    local seoul = loadstring(game:HttpGet(SEOUL))()()
+    local seoul = loadstring(game:HttpGet(K.SEOUL))()()
     local win = seoul:window('Project Slayer (E)')
     if not win then return end
     uiGui = genv.seoul
@@ -4249,15 +4253,15 @@ local function buildUi()
     -- Neither a dropdown nor a button shows its own value, so each carries the
     -- current one in its name and repaints it in the callback.
     local farmF = win:folder('Farm')
-    farmDd = farmF:dropdown({
+    FARM.dd = farmF:dropdown({
         name = 'Target: none', elements = {},
         call = function(pick)
-            if not farmLabels[pick] then return end
+            if not FARM.labels[pick] then return end
             -- the label IS the name now, so the pick survives that body dying
             farmWant = pick
             farmKey  = nil
             if farmEngaged then farmDisengage(true) end
-            farmDd:modify({ name = 'Target: ' .. pick })
+            FARM.dd:modify({ name = 'Target: ' .. pick })
             confMark()
             -- act now rather than on the next scan: up to 1.5s of nothing
             -- happening after a click reads as the farm being broken
@@ -4277,7 +4281,7 @@ local function buildUi()
             farmWant = key.Name
             farmKey  = nil
             if farmEngaged then farmDisengage(true) end
-            farmDd:modify({ name = 'Target: ' .. farmWant })
+            FARM.dd:modify({ name = 'Target: ' .. farmWant })
             seoul:notify('Target: ' .. farmWant)
             confMark()
             guard(farmTick)
@@ -4425,7 +4429,7 @@ local function buildUi()
             end,
         })
     end
-    farmBtn = farmF:button({
+    FARM.btn = farmF:button({
         name = 'Return point: none',
         call = function()
             local char = Me.Character
@@ -4436,7 +4440,7 @@ local function buildUi()
             end
             farmHome = hrp.CFrame
             local p  = farmHome.Position
-            farmBtn:modify({ name = fmt('Return point: %d, %d, %d',
+            FARM.btn:modify({ name = fmt('Return point: %d, %d, %d',
                 floor(p.X + 0.5), floor(p.Y + 0.5), floor(p.Z + 0.5)) })
             seoul:notify('Return point set')
         end,
@@ -4490,7 +4494,7 @@ local function buildUi()
     tpDd = tpF:dropdown({
         name = 'Target: none', elements = {},
         call = function(pick)
-            local key = tpLabels[pick]
+            local key = TP.labels[pick]
             if not key then return end
             tpKey = key
             tpPaint(pick)
@@ -4583,14 +4587,14 @@ local function buildUi()
     end
 
     conns[#conns + 1] = Input.InputBegan:Connect(function(i, typed)
-        if not typed and i.KeyCode == UI_KEY and uiGui and uiGui.Parent then
+        if not typed and i.KeyCode == K.UI_KEY and uiGui and uiGui.Parent then
             uiGui.Enabled = not uiGui.Enabled
         end
     end)
 
     -- Phase two of the config: the switches, now that every pill exists to be
     -- seeded. A saved target is a name, so it survives the body that carried it.
-    if farmWant and farmDd then farmDd:modify({ name = 'Target: ' .. farmWant }) end
+    if farmWant and FARM.dd then FARM.dd:modify({ name = 'Target: ' .. farmWant }) end
     local restored = confSwitches(confSaved)
 
     win:ready()
