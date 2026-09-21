@@ -563,6 +563,16 @@ local RAID = {
     after  = 3,       -- grace after the most recent claim
     settle = 10,      -- cap, if nothing is ever claimed; each claim re-arms it
     tick   = 0.5,     -- seconds between passes
+    -- The camp's loot is claimed before the tour moves on - requested: "raid
+    -- loot always needs to be claimed before it moves onto the next one". The
+    -- waits above end on evidence but still had caps, so a seal that broke
+    -- late or a claim that kept missing let the tour leave a chest behind.
+    -- Now it stays while any cache within `cacheNear` of the camp is unopened
+    -- or any drop there is unclaimed. `lootCap` is only the last resort, for a
+    -- cache that can never open (another player took it mid-claim, a seal
+    -- that never breaks); the status says when it fires.
+    cacheNear = 80,
+    lootCap   = 90,
 }
 local RAID_STATE = { phase = 'off', area = nil, camp = 0, cleared = 0 }
 -- when the current stop began, and what the loot run had claimed when the camp
@@ -1192,6 +1202,21 @@ do
         return preset
     end
 
+    -- Is this toolbar item a WEAPON? It has to resolve to a swing preset the
+    -- server knows, and not be fists or a fighting style: `Combat` (fists) is
+    -- itself a preset, and styles carry Category 'Style'. With no preset table
+    -- to check against nothing counts - a potion must never be "equipped" as a
+    -- weapon on a guess. Read live: Claws is Category 'Weapons', a Cutlass
+    -- 'Katana', the Biwa Bell 'Quest Items', potions 'Potions'.
+    function FARM.isWeapon(item)
+        if not PRESETS() then return false end
+        local p = resolve(item)
+        if not p or p == FISTS then return false end
+        local I = ITEMS()
+        local e = I and I[item]
+        return not (type(e) == 'table' and e.Category == 'Style')
+    end
+
     local function farmPreset()
         local item = farmItem()
         if item == nil then return FISTS end
@@ -1468,8 +1493,13 @@ local function farmTick()
     -- point of targeting by name: the selection outlives the individual. Only
     -- a name that matches NOTHING any more is a refusal, and it keeps the
     -- selection so the farm picks up again when one respawns.
+    -- Except the raid's pick. The raid addresses one specific BODY - the free
+    -- mob of two with the same name, when another player is on the nearer -
+    -- and re-picking by name here swapped it for the nearest same-named one
+    -- before we had even engaged, which put two players on one mob.
+    local raidBody = RAID.active() and farmKey ~= nil and farmResolve(farmKey) ~= nil
     if not (farmKey and typeof(farmKey) == 'Instance' and farmKey.Parent
-        and farmKey.Name == farmWant and farmEngaged) then
+        and farmKey.Name == farmWant and (farmEngaged or raidBody)) then
         local picked = farmPick(farmWant)
         if picked ~= farmKey then
             if farmEngaged then farmDisengage(true) end
@@ -2428,6 +2458,23 @@ function LOOT.pin()
     if not cf then return end
     local hrp = tpHrp()
     if not hrp then return end
+    -- A park is only "stay where the last job left you". When something ELSE
+    -- moves us a long way - the dungeon switching maps between floors, a
+    -- respawn - that is the game putting us somewhere on purpose; our own
+    -- teleports clear the park before they move. Seen live: a new floor on a
+    -- new map teleported us there, this pin dragged us back every frame to the
+    -- old map's spot, where nothing streams in, and wave farm waited forever
+    -- on an empty baseplate. The ground's own push-out is ~6 studs, so a jump
+    -- past `parkJump` is not that. Only once this park has been HELD a frame:
+    -- a fresh park can legitimately be far from the body (a kill in the air
+    -- parks us buried under it, often more than `parkJump` down).
+    if not LOOT.spot then
+        if FARM.parkHeld == cf and (hrp.Position - cf.Position).Magnitude > FARM.parkJump then
+            FARM.park, FARM.parkHeld = nil, nil
+            return
+        end
+        FARM.parkHeld = cf
+    end
     hrp.CFrame                 = cf
     hrp.AssemblyLinearVelocity = ZERO
 end
@@ -2625,6 +2672,39 @@ local function lootPass()
     FARM_STATE.looting = false
 end
 
+-- Loot that is ON ITS WAY: a drop in LootDrops whose prompt is still
+-- disabled. Logged live at a raid camp: the cache opened and five LootDrops
+-- spawned with `LootDropPrompt.Enabled = false`, enabling ~0.9s later.
+-- lootScan skips a disabled prompt, so the hold read "nothing left" and let
+-- go, the raid engaged the NEXT camp 450 studs off inside its radius, and the
+-- loot run - which never interrupts a fight - left the drops lying until the
+-- tour passed again. Reported: "it's opening chest for raid but skipping past
+-- all the loot" and "if i turn off raid, it claims the loot". Only LootDrops:
+-- a disabled prompt in Chests is a sealed cache, another camp's. Each counts
+-- for `dropWait` from first sight, so one that never enables cannot hold us.
+LOOT.dropWait = 5
+LOOT.dropSeen = setmetatable({}, { __mode = 'k' })
+function LOOT.dropsComing(at, within)
+    local f   = workspace:FindFirstChild('LootDrops')
+    local hrp = tpHrp()
+    at = at or (hrp and hrp.Position)
+    if not (f and at) then return false end
+    local now = clock()
+    for _, x in f:GetDescendants() do
+        if x:IsA('ProximityPrompt') and not x.Enabled then
+            local first = LOOT.dropSeen[x]
+            if not first then first = now LOOT.dropSeen[x] = now end
+            local part = x.Parent
+            while part and not part:IsA('BasePart') do part = part.Parent end
+            if now - first < LOOT.dropWait and part
+                and (part.Position - at).Magnitude <= (within or LOOT.range) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
 -- Armed from farmDisengage when the target died. Returns true when it took
 -- over, which tells the farm NOT to go home: that trip happens on release.
 function FARM.lootArm(goHome)
@@ -2655,6 +2735,9 @@ function FARM.lootHeld()
     end
     if alive and LOOT.wanted() and now < h.cap then
         if FARM_STATE.looting or now - h.last < (h.grace or LOOT.grace) then return true end
+        -- only drops near OUR kill: in a shared dungeon another player's drops
+        -- can sit disabled for us, and each would hold the farm for dropWait
+        if LOOT.dropsComing(lootAnchor, RAID.cacheNear) then return true end
         for _, job in lootScan() or {} do
             if (LOOT.failed[job.prompt] or 0) < LOOT.giveUp then return true end
         end
@@ -2730,6 +2813,43 @@ local function raidMobs(origin)
     end
     sort(out, function(a, b) return a.dist < b.dist end)
     return out
+end
+
+-- The chests in Workspace.Chests within `cacheNear` of the camp, taken when
+-- it dies. A cache is a Model holding a prompt (ChestPrompt, Enabled = false
+-- while sealed); claiming it destroys the prompt.
+function RAID.cachesNear(at)
+    local out = {}
+    local chests = workspace:FindFirstChild('Chests')
+    if not (at and chests) then return out end
+    for _, m in chests:GetChildren() do
+        local pr = m:FindFirstChildWhichIsA('ProximityPrompt', true)
+        local part = pr and pr.Parent
+        while part and not part:IsA('BasePart') do part = part.Parent end
+        if part and (part.Position - at).Magnitude <= RAID.cacheNear then
+            out[#out + 1] = m
+        end
+    end
+    return out
+end
+
+-- Anything of this camp's still unclaimed: a cache with its prompt (sealed or
+-- not) and not open, or any claimable prompt - the drop a cache spawns - near
+-- the camp. Failed prompts count too: the loot run keeps retrying them, and
+-- leaving is exactly what the user asked not to happen.
+function RAID.pending()
+    if not RAID.caches then return false end
+    for _, m in RAID.caches do
+        if m.Parent and m:FindFirstChildWhichIsA('ProximityPrompt', true)
+            and m:GetAttribute('IsOpen') ~= true then
+            return true
+        end
+    end
+    local at = RAID.campAt
+    for _, job in (lootScan() or {}) do
+        if at and (job.at - at).Magnitude <= RAID.cacheNear then return true end
+    end
+    return at ~= nil and LOOT.dropsComing(at, RAID.cacheNear)
 end
 
 -- Is anything alive in range at all? `raidMobs` answers "is there a CAMP here",
@@ -2872,6 +2992,56 @@ function LOOT.tour()
     s.wait = clock() + LOOT.dwell
 end
 
+-- ── sharing a dungeon with other players ───────────────────────────────────
+-- Requested: two players wave-farming the same dungeon should spread out, but
+-- team up when there is nothing else - the last enemy, or one of several that
+-- spawn one at a time (bosses and tanky mobs come last). The game does not
+-- say who is fighting what, so "taken" is positional: another player's root
+-- within `claimNear` of the mob. Another copy of this script sits `under`
+-- (7) below its target; a player fighting by hand stands beside it. Kept
+-- tight so a player on the next mob over does not claim this one.
+RAID.claimNear = 10
+
+-- The lowest UserId among other players on this mob, or nil when it is free.
+function RAID.claimedBy(root)
+    local low
+    for _, pl in Plrs:GetPlayers() do
+        if pl ~= Me then
+            local ch = pl.Character
+            local r  = ch and ch:FindFirstChild('HumanoidRootPart')
+            if r and (r.Position - root.Position).Magnitude <= RAID.claimNear then
+                local id = pl.UserId or 0
+                if not low or id < low then low = id end
+            end
+        end
+    end
+    return low
+end
+
+-- `mobs` is nearest-first. A new target is the nearest FREE mob, else the
+-- nearest (team up). The current one is kept - nearest-first would drop a
+-- half-dead target for every fresh spawn that lands closer, and two scripts
+-- that both switched on seeing each other would chase each other round the
+-- room - except that when two players share a mob and a free one is waiting,
+-- the one with the HIGHER UserId moves. Both copies apply the same rule, so
+-- exactly one of them goes.
+function RAID.waveTarget(mobs)
+    local me = Me.UserId or 0
+    local cur, free
+    for _, m in mobs do
+        local _, root = farmResolve(m.key)
+        m.by = root and RAID.claimedBy(root) or nil
+        if m.key == farmKey then cur = m end
+        if m.by == nil and not free then free = m end
+    end
+    RAID_STATE.shared = cur ~= nil and cur.by ~= nil
+    if cur then
+        if cur.by ~= nil and free and me > cur.by then return free.key end
+        return cur.key
+    end
+    return (free or mobs[1]).key
+end
+
 local function raidPass()
     if not RAID.active() then
         if RAID_STATE.phase ~= 'off' then
@@ -2886,6 +3056,28 @@ local function raidPass()
     local hrp = tpHrp()
     if not hrp then return end
 
+    -- Died mid-camp. Requested: "if i die, it should return to the raid i was
+    -- doing". The respawn is far from the camp, so the camp was out of range
+    -- on the next pass - which read as CLEARED, and the tour moved on to the
+    -- next area. So: nothing is decided while we are dead, and a new body
+    -- with a camp unfinished (still fighting, or its loot still pending) goes
+    -- straight back to it, buried. Not in wave mode: the dungeon is all "here".
+    local ch  = Me.Character
+    local hum = ch and ch:FindFirstChildOfClass('Humanoid')
+    if hum and hum.Health <= 0 then
+        RAID_STATE.phase = 'dead'
+        return
+    end
+    if RAID.char ~= ch then
+        local was = RAID.char
+        RAID.char = ch
+        if was and not RAID.wave and RAID.campAt and (RAID.fought or RAID.caches) then
+            RAID_STATE.phase = 'returning to the camp'
+            tpGo((LOOT.buried(RAID.campAt)))
+            return
+        end
+    end
+
     local mobs = raidMobs(hrp.Position)
     RAID_STATE.camp = #mobs
     if #mobs > 0 then
@@ -2894,15 +3086,10 @@ local function raidPass()
         -- is what makes it work through a camp.
         RAID_STATE.phase = 'fight'
         RAID.fought = true
-        local best = mobs[1].key
-        if RAID.wave then
-            -- Waves keep arriving mid-fight, and nearest-first would drop a
-            -- half-dead target for every fresh spawn that lands closer. Finish
-            -- what we are on while it is still in the list.
-            for _, m in mobs do
-                if m.key == farmKey then best = farmKey break end
-            end
-        end
+        local best = RAID.wave and RAID.waveTarget(mobs) or mobs[1].key
+        -- where the camp is, for finding its cache once it is dead
+        local _, bestRoot = farmResolve(best)
+        if bestRoot then RAID.campAt = bestRoot.Position end
         if farmKey ~= best then
             -- the raid addresses a specific body, not a kind: three mobs in a
             -- camp share a name and it works through them one at a time, so
@@ -2930,6 +3117,7 @@ local function raidPass()
         RAID.since = clock()
         RAID.loot  = FARM_STATE.looted
         RAID.seen  = FARM_STATE.looted
+        RAID.caches, RAID.lootCapAt = RAID.cachesNear(RAID.campAt), clock() + RAID.lootCap
     end
     if RAID.wave then
         -- Nowhere to go: the next wave comes to us. The farm's park keeps the
@@ -2971,6 +3159,15 @@ local function raidPass()
         RAID_STATE.phase = 'looting'
         return
     end
+    -- The camp's own loot, on evidence, before any travel.
+    if RAID.pending() then
+        if clock() < (RAID.lootCapAt or 0) then
+            RAID_STATE.phase = 'looting'
+            return
+        end
+        RAID_STATE.phase = 'gave up on the camp\'s loot after ' .. RAID.lootCap .. 's'
+    end
+    RAID.caches = nil
     local areas = raidAreas()
     if #areas == 0 then
         RAID_STATE.phase = 'nowhere to go'
@@ -3013,8 +3210,8 @@ end)
 --   floor only, absent = the rest of the run). Streak ("+5% per clean floor,
 --   up to +50%") has a FUNCTION multiplier, so it is valued at its cap.
 --
--- Wanted (the user's order): Second Wind whenever we are under `lowHp`
--- (400) health. Then a multiplier that lasts the REST OF THE RUN
+-- Wanted (the user's order): Second Wind whenever we are under `lowFrac`
+-- (30%) of max health. Then a multiplier that lasts the REST OF THE RUN
 -- (Streak, Ascension, Marathon...) before anything, in either hand. Then
 -- rewards - Fortune, then damage, then Second Wind; events - the biggest
 -- one-floor multiplier, and the Skip card when nothing multiplies.
@@ -3025,7 +3222,11 @@ local CARDS = {
     wait   = 0.4,     -- a hand must have been up this long: slots fill in
     retry  = 2.5,     -- re-send if the same hand / skip is still up after this
     streak = 1.5,     -- what Streak is worth: its +50% cap
-    lowHp  = 400,     -- below this, Second Wind beats every other card
+    lowFrac = 0.3,    -- under this share of max health, Second Wind beats
+                      -- every other card. A share, not a number: max health
+                      -- moves with the run (Glass Floor halves it, Thick
+                      -- Blood adds half), and a flat 400 meant a different
+                      -- risk every time it did.
     -- Never taken on our LAST heart, whatever put us there (Reincarnation
     -- stands us up on one, or we simply lost the rest): a floor that drains
     -- health every second is a death sentence with nothing to fall back on.
@@ -3154,7 +3355,9 @@ function CARDS.score(c, events)
     -- Hurt, a full heal is worth more than anything a card can pay later.
     if t == 'Second Wind' then
         local hum = Me.Character and Me.Character:FindFirstChildOfClass('Humanoid')
-        if hum and hum.Health < CARDS.lowHp then return 20000 end
+        if hum and hum.MaxHealth > 0 and hum.Health < hum.MaxHealth * CARDS.lowFrac then
+            return 20000
+        end
     end
     local m = CARDS.mult(c)
     -- a whole-run multiplier outranks everything else, in either hand
@@ -3171,9 +3374,12 @@ function CARDS.score(c, events)
     if e and e.key == 'HeavyHitter' then return 3020 end
     n = t:match('^Damage %+([%d%.]+)$')
     if n then return 2900 + min(tonumber(n), 99) end
+    -- A one-floor points multiplier in this hand beats Second Wind (reported:
+    -- it took Second Wind over Fair Fight at full health). Below Fortune and
+    -- damage, which the user put first. Hurt, Second Wind still wins above.
+    if m then return 2500 + m end
     if t == 'Second Wind' then return 2000 end
-    -- none of the wanted three: a multiplier, then points, then anything
-    if m then return 1000 + m end
+    -- none of the wanted ones: points, then anything
     n = t:match('%+(%d+)$')
     if n and c.desc:find('[Pp]oints') then return 500 + min(tonumber(n), 99999) / 1e5 end
     return 100
@@ -3192,10 +3398,131 @@ function CARDS.best(hand)
     return best, events
 end
 
+-- ── keep a weapon in hand, round by round ──────────────────────────────────
+-- Requested: "every new round, it should try to equip anything that isn't the
+-- fist, but is also a weapon" - and on a Bare Hands floor, fists. Read live:
+-- a toolbar key press sends SignalEvent('Item_Equip', <slot>);
+-- Players.<me>.Items_Config.Equipped is the equipped slot, 0 for none; and
+-- pressing the equipped slot's key again UNEQUIPS (Item_Equip(0)), so a key is
+-- only ever pressed for a slot that is not the equipped one. The game strips
+-- the weapon itself on the frame a Bare Hands floor starts - to nothing, not
+-- to fists - and never gives it back. Keys are pressed like a player would,
+-- as asked, not through the game's own functions.
+-- A round starts when the top bar's floor label changes. Per round: up to
+-- `gearTries` presses, `gearGap` apart, so a floor where equipping is locked
+-- costs a few taps and not a stream of them.
+CARDS.keys      = { 'One', 'Two', 'Three', 'Four', 'Five' }
+CARDS.gear      = { floor = nil, want = nil, tries = 0, at = 0, bare = false }
+CARDS.gearTries = 5
+CARDS.gearGap   = 1.5
+CARDS.bareNext  = false   -- the next round is a Bare Hands floor
+CARDS.lastWeapon = nil    -- the weapon slot we last saw equipped: preferred
+
+function CARDS.equipped()
+    local ic = Me:FindFirstChild('Items_Config')
+    local e  = ic and ic:FindFirstChild('Equipped')
+    return e and e.Value or nil
+end
+
+-- Slot number -> item name, from the save: Player_Service.Data.<me>.slots.
+-- Slot<slotEquipped>.Inventory.Toolbar.<One..Five> holds item ids, resolved
+-- through the same save's Inventory.Inventory.<item name>.Id.
+function CARDS.toolbar()
+    local x = RepS
+    for _, name in { 'Player_Service', 'Data', Me.Name } do x = x and x:FindFirstChild(name) end
+    local se    = x and x:FindFirstChild('slotEquipped')
+    local slots = x and x:FindFirstChild('slots')
+    local save  = se and slots and slots:FindFirstChild('Slot' .. tostring(se.Value))
+    local inv   = save and save:FindFirstChild('Inventory')
+    local bar   = inv and inv:FindFirstChild('Toolbar')
+    local items = inv and inv:FindFirstChild('Inventory')
+    local names = {}
+    if not (bar and items) then return names end
+    local byId = {}
+    for _, it in items:GetChildren() do
+        local id = it:FindFirstChild('Id')
+        if id then byId[id.Value] = it.Name end
+    end
+    for i, key in CARDS.keys do
+        local v = bar:FindFirstChild(key)
+        if v and v.Value ~= 0 then names[i] = byId[v.Value] end
+    end
+    return names
+end
+
+function CARDS.isWeaponSlot(i, names)
+    return i ~= nil and names[i] ~= nil and FARM.isWeapon ~= nil and FARM.isWeapon(names[i])
+end
+
+function CARDS.weaponSlot(names)
+    if CARDS.isWeaponSlot(CARDS.lastWeapon, names) then return CARDS.lastWeapon end
+    for i = 1, #CARDS.keys do
+        if CARDS.isWeaponSlot(i, names) then return i end
+    end
+    return nil
+end
+
+function CARDS.fistsSlot(names)
+    for i = 1, #CARDS.keys do
+        if names[i] == 'Combat' then return i end
+    end
+    return nil
+end
+
+function CARDS.floorText(root)
+    local bar = root:FindFirstChild('OuwigaharaTopBar')
+    bar = bar and bar:FindFirstChild('Bar')
+    local f = bar and bar:FindFirstChild('Floor')
+    return f and f.Text or nil
+end
+
+-- One tap of a toolbar key, the way a player would. Never into a focused text
+-- box: it would type the digit instead.
+function CARDS.press(slot)
+    if Input:GetFocusedTextBox() then return false end
+    local ok, vim = pcall(game.GetService, game, 'VirtualInputManager')
+    if not (ok and vim) then return false end
+    local code = Enum.KeyCode[CARDS.keys[slot]]
+    vim:SendKeyEvent(true, code, false, game)
+    task.delay(0.1, function() vim:SendKeyEvent(false, code, false, game) end)
+    return true
+end
+
+function CARDS.gearStep(root)
+    local g     = CARDS.gear
+    local names = CARDS.toolbar()
+    local now   = CARDS.equipped()
+    if CARDS.isWeaponSlot(now, names) then CARDS.lastWeapon = now end
+    local f = CARDS.floorText(root)
+    if f ~= g.floor then
+        local first = g.floor == nil
+        g.floor, g.tries, g.at = f, 0, 0
+        if not first then
+            g.bare = CARDS.bareNext
+            CARDS.bareNext = false
+            g.want = g.bare and 'fists' or 'weapon'
+        end
+    end
+    local want = nil
+    if g.want == 'fists' then
+        want = CARDS.fistsSlot(names)
+    elseif g.want == 'weapon' then
+        -- already holding a weapon: nothing to do this round
+        if CARDS.isWeaponSlot(now, names) then g.want = nil return end
+        want = CARDS.weaponSlot(names)
+    end
+    if not want then return end
+    if now == want then g.want = nil return end
+    if g.tries >= CARDS.gearTries or clock() < g.at then return end
+    g.at = clock() + CARDS.gearGap
+    if CARDS.press(want) then g.tries += 1 end
+end
+
 function CARDS.pass()
     if not (CARDS.on or CARDS.skip) then CARDS.why = 'off' return end
     local root = CARDS.root()
     if not root then CARDS.why = 'no dungeon ui' return end
+    if CARDS.on then CARDS.gearStep(root) end
     local hand = CARDS.hand(root)
     if #hand > 0 then
         if not CARDS.on then CARDS.why = 'a hand is up; auto pick is off' return end
@@ -3214,6 +3541,7 @@ function CARDS.pass()
         if not remote then CARDS.why = 'no remote' return end
         remote:FireServer('OuwigaharaRequest', { action = 'Pick', id = best.id })
         CARDS.sentAt, CARDS.last = clock(), best.title
+        if best.title:match('^Bare Hands') then CARDS.bareNext = true end
         CARDS.picks += 1
         CARDS.why = 'picked ' .. best.title
         return
@@ -3586,6 +3914,7 @@ function FARM.seekWhy(name)
     end
 end
 
+FARM.parkJump   = 60    -- moved further than this by someone else: drop the park
 FARM.seekNear   = 150   -- studs from the spawn that count as "there"
 FARM.seekSettle = 8     -- seconds between trips, so a slow stream is waited out
 FARM.seekAt     = 0
