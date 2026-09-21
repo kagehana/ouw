@@ -640,7 +640,9 @@ local FARM = {
     -- distance either way; only the sign changes.
     place  = 'under',
     behind = 4,      -- studs off its back when place is 'behind'
-    evade      = true, -- leave the hitbox while a boss skill is live
+    evade      = true, -- leave the hitbox while a boss skill is live; the
+                       -- menu's `Never dodge` is the inverse, since a toggle
+                       -- has to ship false
     evadeDrop  = 30,   -- EXTRA studs to sink while a skill is live, added on
                        -- top of `under`, so the real dodge distance is ~37.
                        -- Straight down, not up, so we stay under the target and
@@ -780,7 +782,11 @@ local farmEngaged   = false
 local FARM_STATE    = { engaged = false, target = nil, retreated = false,
                         evading = false, looting = false, looted = 0,
                         preset = nil, why = 'off', key = nil, reach = nil,
-                        want = nil, probing = false, skill = nil }
+                        want = nil, probing = false, skill = nil,
+                        -- what set off the last dodge, and frames engaged /
+                        -- frames dodging since the last engage: the one number
+                        -- that says whether the dodge is eating the fight
+                        dodge = nil, frames = 0, dodgeFrames = 0 }
 -- Probe and dodge state on one table, not eight locals: the top level is at
 -- Luau's 200-local ceiling when compiled without optimisation (Volt).
 local FP = { evadeUntil = 0, hardStop = 0, reach = nil, probeAt = 0, lastHp = nil,
@@ -972,6 +978,17 @@ local function farmWatchSkills(rig)
         -- brought us back mid-wind-up, straight into the hit.
         farmMarkers[x] = true
         FP.evadeUntil = max(FP.evadeUntil, now + FARM.evadeMin)
+        -- Named, because a dodge that never ends looks exactly like a farm
+        -- that never goes to the target. Printed once per name to the console
+        -- (F9), so a user on another machine can read off what triggers it.
+        local what = x.ClassName .. ' ' .. x.Name
+            .. (x:IsA('BasePart') and fmt(' (%.1f studs)', x.Size.Magnitude) or '')
+        FARM_STATE.dodge = what
+        FARM.dodgeSeen = FARM.dodgeSeen or {}
+        if not FARM.dodgeSeen[x.Name] then
+            FARM.dodgeSeen[x.Name] = true
+            print('[project] dodge trigger: ' .. what .. ' on ' .. rig.Name)
+        end
     end)
     farmEvadeConns[#farmEvadeConns + 1] = rig.DescendantRemoving:Connect(function(x)
         farmMarkers[x] = nil
@@ -1000,6 +1017,7 @@ local function farmEngage(rig, root, hum)
     farmBeat           = clock()
     FARM_STATE.engaged = true
     FARM_STATE.target  = rig
+    FARM_STATE.frames, FARM_STATE.dodgeFrames = 0, 0
     -- a mob we fight is aggro'd already: the chain must not tag it again
     if FARM.tagged then FARM.tagged[rig] = true end
 end
@@ -1460,6 +1478,7 @@ local function farmTick()
     end
     if not farmKey then
         FARM_STATE.why = fmt('nothing named %s is tracked', farmWant)
+        if FARM.seekWhy then FARM.seekWhy(farmWant) end
         return
     end
     if not farmBind() then
@@ -1537,6 +1556,7 @@ local function farmTick()
         FARM_STATE.why = 'engaged'
     else
         FARM_STATE.why = 'target is not spawned'
+        if FARM.seekWhy then FARM.seekWhy(farmWant) end
     end
 end
 
@@ -1692,6 +1712,8 @@ local function farmStep()
     end
     farmHrp.CFrame                 = aim
     farmHrp.AssemblyLinearVelocity = ZERO
+    FARM_STATE.frames += 1
+    if FARM_STATE.evading then FARM_STATE.dodgeFrames += 1 end
     -- Stamped only on a frame that actually pinned us, which is what makes the
     -- watchdog in the scan loop mean something.
     farmBeat = clock()
@@ -2394,6 +2416,14 @@ end
 -- the whole point of being under it is lost. Costs two writes a frame while a
 -- claim is live and nothing at all otherwise.
 function LOOT.pin()
+    -- An engaged farm owns the body. This pin runs AFTER farmStep in the same
+    -- frame, so a LOOT.spot left set - a hold that never released, a spot a
+    -- quest talk restored - overwrote the farm's write every frame: the farm
+    -- reported engaged while the body sat underground wherever that spot was,
+    -- for every target. Reported by a second user as "it never goes to the
+    -- target". A claim and the aggro chain are the only things that may take
+    -- the body mid-engagement, and both say so.
+    if farmEngaged and not (FARM_STATE.looting or FARM_STATE.pulling) then return end
     local cf = LOOT.spot or FARM.parked()
     if not cf then return end
     local hrp = tpHrp()
@@ -2966,6 +2996,263 @@ task.spawn(function()
     end
 end)
 
+-- ── dungeon cards ───────────────────────────────────────────────────────────
+-- The Minigames dungeon deals a hand after each floor. Verified live:
+--
+-- * A hand is PlayerGui.ComponentsHolder.MainNotificationFrame.OuwigaharaOffers
+--   .BBCards.Cards.<slot>.Card.<slot>.Title/Bottom, 4-5 visible slots.
+-- * Picking sends SignalEvent('OuwigaharaRequest', { action = 'Pick', id =
+--   '<slot>' }), and the wave skip on the top bar ("Skip 0/1") sends
+--   { action = 'Skip' }. Nothing else goes out; the buttons are only the UI.
+-- * Two hands per floor. The first is rewards (Second Wind, stat cards,
+--   trophies, Fortune); the second is floor events - "<Name>, x1.3 points" -
+--   and always carries a `Skip` card ("No event this floor"), which is how
+--   the two are told apart.
+-- * Every event is described in Minigames.Ouwigahara.Events.Types, keyed by
+--   an internal name, with `Title`, `Score.Multiplier` and `Floors` (1 = next
+--   floor only, absent = the rest of the run). Streak ("+5% per clean floor,
+--   up to +50%") has a FUNCTION multiplier, so it is valued at its cap.
+--
+-- Wanted (the user's order): Second Wind whenever we are under `lowHp`
+-- (400) health. Then a multiplier that lasts the REST OF THE RUN
+-- (Streak, Ascension, Marathon...) before anything, in either hand. Then
+-- rewards - Fortune, then damage, then Second Wind; events - the biggest
+-- one-floor multiplier, and the Skip card when nothing multiplies.
+local CARDS = {
+    on     = false,   -- ships false: a Seoul toggle cannot be seeded
+    skip   = false,   -- press the wave skip between floors
+    tick   = 0.25,
+    wait   = 0.4,     -- a hand must have been up this long: slots fill in
+    retry  = 2.5,     -- re-send if the same hand / skip is still up after this
+    streak = 1.5,     -- what Streak is worth: its +50% cap
+    lowHp  = 400,     -- below this, Second Wind beats every other card
+    -- Never taken on our LAST heart, whatever put us there (Reincarnation
+    -- stands us up on one, or we simply lost the rest): a floor that drains
+    -- health every second is a death sentence with nothing to fall back on.
+    -- Read off the player's `Hearts` attribute.
+    lastHeart = { BleedingFloor = true },
+    why    = 'off', last = nil, picks = 0, skips = 0,
+    sig = nil, seenAt = 0, sentAt = 0, skipText = nil, skipAt = 0,
+    -- Cards that cost more than they give, never taken even as a fallback.
+    -- NotRanked cards are fine: asked for explicitly.
+    avoid = { BloodPact = true, TollGate = true, Sacrifice = true, Tribute = true,
+              Reshuffle = true, GlassCannon = true, Pacifist = true,
+              Featherweight = true, FocusedMind = true, Handoff = true,
+              Respec = true, TwinSouls = true, Wager = true, TimeAttack = true,
+              LastRites = true },
+}
+
+-- Title -> { key, ty }, from the game's own table. Cached once it loads.
+function CARDS.events()
+    if CARDS.ev then return CARDS.ev end
+    local x = RepS
+    for _, name in { 'Minigames Place', 'Minigames', 'Ouwigahara', 'Events' } do
+        x = x and x:FindFirstChild(name)
+    end
+    if not x then return {} end
+    local ok, t = pcall(function() return require(x).Types end)
+    if not (ok and type(t) == 'table') then return {} end
+    local map = {}
+    for key, ty in t do
+        if type(ty) == 'table' and type(ty.Title) == 'string' then
+            map[ty.Title] = { key = key, ty = ty }
+        end
+    end
+    CARDS.ev = map
+    return map
+end
+
+-- Visible all the way up to `stop`: a hidden slot keeps its last text.
+function CARDS.shown(g, stop)
+    while g and g ~= stop do
+        if g:IsA('GuiObject') and not g.Visible then return false end
+        if g:IsA('LayerCollector') and not g.Enabled then return false end
+        g = g.Parent
+    end
+    return g == stop
+end
+
+function CARDS.root()
+    local pg = Me:FindFirstChild('PlayerGui')
+    local ch = pg and pg:FindFirstChild('ComponentsHolder')
+    return ch and ch:FindFirstChild('MainNotificationFrame')
+end
+
+function CARDS.hand(root)
+    local offers = root:FindFirstChild('OuwigaharaOffers')
+    local bb     = offers and offers:FindFirstChild('BBCards')
+    local slots  = bb and bb:FindFirstChild('Cards')
+    local out    = {}
+    if not (slots and CARDS.shown(slots, root)) then return out end
+    for _, slot in slots:GetChildren() do
+        local card  = slot:FindFirstChild('Card')
+        local inner = card and card:FindFirstChild(slot.Name)
+        local title = inner and inner:FindFirstChild('Title')
+        if title and title.Text ~= '' and CARDS.shown(title, root) then
+            local bottom = inner:FindFirstChild('Bottom')
+            out[#out + 1] = { id = slot.Name, title = title.Text,
+                              desc = bottom and bottom.Text or '' }
+        end
+    end
+    sort(out, function(a, b) return a.id < b.id end)
+    return out
+end
+
+-- The points multiplier on a card, or nil. From the module when it knows the
+-- title, else from the title text ("..., x1.3 points").
+function CARDS.mult(c)
+    local e = CARDS.events()[c.title]
+    local m = e and e.ty.Score and e.ty.Score.Multiplier
+    if type(m) == 'function' then return CARDS.streak end
+    if type(m) == 'number' then return m end
+    if c.title:match('^Streak') then return CARDS.streak end
+    local x = c.title:match('x([%d%.]+) points')
+    return x and tonumber(x) or nil
+end
+
+-- Takes skills away for the REST OF THE RUN: the module's NoSkills flag on a
+-- card with no one-floor limit, or the text saying so for a card it does not
+-- know. Iron Discipline (one floor, no flag) passes; Pacifist does not.
+function CARDS.noSkillsForRun(c, e)
+    if e then return e.ty.NoSkills == true and e.ty.Floors ~= 1 end
+    local d = c.desc:lower()
+    return d:find('no longer use skills', 1, true) ~= nil
+        and d:find('rest of the run', 1, true) ~= nil
+end
+
+-- Lasting = the module gives it no `Floors`; one read off a title alone is
+-- assumed to be one floor, except Streak, which says so in its text.
+function CARDS.lasting(c)
+    local e = CARDS.events()[c.title]
+    if e then return e.ty.Floors == nil end
+    return c.title:match('^Streak') ~= nil
+end
+
+function CARDS.score(c, events)
+    local t = c.title
+    local e = CARDS.events()[t]
+    if e and CARDS.avoid[e.key] then return -1 end
+    -- The table can fail to load (it is a game module, required on whatever
+    -- executor this is), and the avoid list must not depend on it: match the
+    -- same keys against the title, CamelCase split - GlassCannon starts
+    -- "Glass Cannon".
+    if not e then
+        for key in CARDS.avoid do
+            local words = key:gsub('(%l)(%u)', '%1 %2')
+            if t:sub(1, #words) == words then return -1 end
+        end
+    end
+    -- Never lose skills for the whole run; one floor without them is fine.
+    if CARDS.noSkillsForRun(c, e) then return -1 end
+    local hearts = Me:GetAttribute('Hearts')
+    if type(hearts) == 'number' and hearts <= 1 then
+        for key in CARDS.lastHeart do
+            local words = key:gsub('(%l)(%u)', '%1 %2')
+            if (e and e.key == key) or t:sub(1, #words) == words then return -1 end
+        end
+    end
+    -- Hurt, a full heal is worth more than anything a card can pay later.
+    if t == 'Second Wind' then
+        local hum = Me.Character and Me.Character:FindFirstChildOfClass('Humanoid')
+        if hum and hum.Health < CARDS.lowHp then return 20000 end
+    end
+    local m = CARDS.mult(c)
+    -- a whole-run multiplier outranks everything else, in either hand
+    if m and m > 1 and CARDS.lasting(c) then return 10000 + m end
+    if events then
+        if t == 'Skip' then return 1 end
+        if m then return m end
+        return 0.5
+    end
+    local n = t:match('^Fortune %+(%d+)')
+    if n then return 4000 + min(tonumber(n), 999999) / 1e6 end
+    n = t:match('^Damage %+([%d%.]+)%%')
+    if n then return 3000 + tonumber(n) end
+    if e and e.key == 'HeavyHitter' then return 3020 end
+    n = t:match('^Damage %+([%d%.]+)$')
+    if n then return 2900 + min(tonumber(n), 99) end
+    if t == 'Second Wind' then return 2000 end
+    -- none of the wanted three: a multiplier, then points, then anything
+    if m then return 1000 + m end
+    n = t:match('%+(%d+)$')
+    if n and c.desc:find('[Pp]oints') then return 500 + min(tonumber(n), 99999) / 1e5 end
+    return 100
+end
+
+function CARDS.best(hand)
+    local events = false
+    for _, c in hand do
+        if c.title == 'Skip' then events = true end
+    end
+    local best, bestS
+    for _, c in hand do
+        local sc = CARDS.score(c, events)
+        if sc >= 0 and (not bestS or sc > bestS) then best, bestS = c, sc end
+    end
+    return best, events
+end
+
+function CARDS.pass()
+    if not (CARDS.on or CARDS.skip) then CARDS.why = 'off' return end
+    local root = CARDS.root()
+    if not root then CARDS.why = 'no dungeon ui' return end
+    local hand = CARDS.hand(root)
+    if #hand > 0 then
+        if not CARDS.on then CARDS.why = 'a hand is up; auto pick is off' return end
+        local sig = {}
+        for i, c in hand do sig[i] = c.id .. '=' .. c.title end
+        sig = concat(sig, '|')
+        if sig ~= CARDS.sig then CARDS.sig, CARDS.seenAt, CARDS.sentAt = sig, clock(), 0 end
+        if clock() - CARDS.seenAt < CARDS.wait then CARDS.why = 'reading the hand' return end
+        if CARDS.sentAt > 0 and clock() - CARDS.sentAt < CARDS.retry then
+            CARDS.why = 'waiting for the pick to land'
+            return
+        end
+        local best = CARDS.best(hand)
+        if not best then CARDS.why = 'nothing worth taking' return end
+        local remote = farmRemote()
+        if not remote then CARDS.why = 'no remote' return end
+        remote:FireServer('OuwigaharaRequest', { action = 'Pick', id = best.id })
+        CARDS.sentAt, CARDS.last = clock(), best.title
+        CARDS.picks += 1
+        CARDS.why = 'picked ' .. best.title
+        return
+    end
+    CARDS.sig = nil
+    if not CARDS.skip then CARDS.why = 'waiting for a hand' return end
+    local bar = root:FindFirstChild('OuwigaharaTopBar')
+    local sk  = bar and bar:FindFirstChild('Skip')
+    local btn = sk and sk:FindFirstChild('Button')
+    if not (btn and CARDS.shown(btn, root)) then
+        CARDS.skipText = nil
+        CARDS.why = 'waiting'
+        return
+    end
+    local lbl  = btn:FindFirstChild('TextLabel', true)
+    local text = lbl and lbl.Text or ''
+    -- Once per appearance. The vote count changing ("Skip 0/1" -> "1/1") is
+    -- the proof it registered; only an unchanged label is re-sent, and only
+    -- after `retry`, since a second press may well take the vote back.
+    if CARDS.skipText ~= nil and (CARDS.skipText ~= text
+        or clock() - CARDS.skipAt < CARDS.retry) then
+        CARDS.why = 'skip sent'
+        return
+    end
+    local remote = farmRemote()
+    if not remote then CARDS.why = 'no remote' return end
+    remote:FireServer('OuwigaharaRequest', { action = 'Skip' })
+    CARDS.skipText, CARDS.skipAt = text, clock()
+    CARDS.skips += 1
+    CARDS.why = 'skipped the wait'
+end
+
+task.spawn(function()
+    while alive do
+        guard(CARDS.pass)
+        task.wait(CARDS.tick)
+    end
+end)
+
 -- ── auto quest ──────────────────────────────────────────────────────────────
 -- Loops one quest: whenever it is not held, go to the NPC that offers it, take
 -- it through the game's own dialogue, and come back. Verified live:
@@ -3015,10 +3302,12 @@ FARM.quest = {
 }
 
 function FARM.questDb()
-    -- the path is inside the pcall too: a missing link throws on the index
-    local ok, m = pcall(function()
-        return require(RepS.CAM.Global.Subsets.Gameplay.Quests)
-    end)
+    local x = RepS
+    for _, name in { 'CAM', 'Global', 'Subsets', 'Gameplay', 'Quests' } do
+        x = x and x:FindFirstChild(name)
+    end
+    if not x then return nil end
+    local ok, m = pcall(require, x)
     return ok and type(m) == 'table' and type(m.Holder) == 'table' and m.Holder or nil
 end
 
@@ -3103,7 +3392,9 @@ end
 -- is both the candidate list for a kill code and where to go for a target
 -- that has not streamed in.
 function FARM.questSpawns()
-    local ok, m = pcall(function() return require(RepS.Regions) end)
+    local mod = RepS:FindFirstChild('Regions')
+    if not mod then return {} end
+    local ok, m = pcall(require, mod)
     return ok and type(m) == 'table' and type(m.NpcSpawns) == 'table'
         and m.NpcSpawns or {}
 end
@@ -3274,14 +3565,84 @@ function FARM.questAim()
     end
 end
 
+-- Farm target's way to a target this client cannot see yet. Rigs stream in
+-- whole (ModelStreamingMode.Atomic) and only within the client's streaming
+-- radius, which Roblox sizes per device: on a lower-end PC a target a few
+-- hundred studs off does not exist on the client at all, so the farm read
+-- "nothing named X" and never moved - reported as "if he's insanely close it
+-- will start farming; mine just teleports". The raid never hit this because it
+-- travels to each camp's area first. This does the same for one name: go to
+-- its spawn (NpcSpawns, map-wide), buried, ask for the area to stream, and
+-- wait there parked until the rig appears and farmTick engages it.
+-- Only for the farm's OWN toggle: the raid picks its targets from what is in
+-- range, and the auto quest travels on its own (questAim).
+-- farmTick's refusal line, told apart from a wait that is going to plan
+function FARM.seekWhy(name)
+    local sk = FARM.seek and FARM.seek(name)
+    if sk == 'here' then
+        FARM_STATE.why = fmt("waiting at %s's spawn for it to stream in", name)
+    elseif sk then
+        FARM_STATE.why = fmt('travelling to %s: not streamed in here', name)
+    end
+end
+
+FARM.seekNear   = 150   -- studs from the spawn that count as "there"
+FARM.seekSettle = 8     -- seconds between trips, so a slow stream is waited out
+FARM.seekAt     = 0
+function FARM.seek(name)
+    if not (FARM.on and name) or RAID.active() then return false end
+    if FARM.quest and FARM.quest.on and FARM.questHere() then return false end
+    -- The loot hold too: farmTick reaches here BEFORE its own lootHeld gate
+    -- (the "nothing named X" branch), and a kill's loot is claimed before the
+    -- body goes anywhere.
+    if farmEngaged or FARM_STATE.looting or FARM_STATE.pulling or FARM.lootHeld()
+        or clock() < tpHoldUntil then
+        return false
+    end
+    local spawn = FARM.questSpawns()[name]
+    local hrp   = tpHrp()
+    if typeof(spawn) ~= 'Vector3' or not hrp then return false end
+    -- Horizontal: we wait buried, so the straight-line distance to a spawn on
+    -- the surface is never small, and read as "not there yet" it re-travelled.
+    local d = hrp.Position - spawn
+    if vec3(d.X, 0, d.Z).Magnitude <= FARM.seekNear then return 'here' end
+    if clock() < FARM.seekAt then return true end
+    FARM.seekAt = clock() + FARM.seekSettle
+    -- Asking beats waiting: the stream around our new position comes anyway,
+    -- this just starts it before we arrive. Yields, so it gets a thread.
+    task.spawn(pcall, function() Me:RequestStreamAroundAsync(spawn) end)
+    -- Without ground yet (not streamed) LOOT.buried drops `blind` (250) under
+    -- the point - on a small streaming radius, too far for a rig on the
+    -- surface ever to stream in. The spawn is itself a surface point, so
+    -- `hide` under it is as good a guess and stays in range.
+    local spot, ground = LOOT.buried(spawn)
+    if not ground then spot = CFrame.new(spawn - vec3(0, LOOT.hide, 0)) end
+    tpGo(spot)
+    -- tpGo clears the park; set it after, so the body waits buried here
+    FARM.park = spot
+    return true
+end
+
 -- Gates the farm's next engagement: while we are talking to someone, while
 -- the quest is not in hand, and while its current step is a hand-in - a kill
 -- then is a kill for nothing, and the farm would hold the body forever. Never
 -- while ANOTHER quest is held, or the farm would wait on a quest we cannot
 -- take until that one ends.
+-- Is the chosen quest offered in THIS place? The Minigames dungeon loads the
+-- quest module with an EMPTY Holder, and a quest restored from the config
+-- then held the farm forever: nothing in hand, nothing to take, so no failed
+-- take ever counted towards `giveUp`. The raid bypasses the gate, which is why
+-- a second user saw the raid work while `Farm target` sat him under the map
+-- on an old park spot, for every target.
+function FARM.questHere()
+    local db = FARM.questDb()
+    return db ~= nil and type(db[FARM.quest.want]) == 'table'
+end
+
 function FARM.questHeld()
     local Q = FARM.quest
     if not (Q.on and Q.want) or RAID.active() then return false end
+    if not FARM.questHere() then return false end
     if Q.fails >= Q.giveUp then return false end
     if Q.busy then return true end
     local now = FARM.questNow()
@@ -3457,6 +3818,7 @@ function FARM.questPass()
     if not Q.on then Q.why = 'off' return end
     if not Q.want then Q.why = 'no quest selected' return end
     if Q.busy then return end
+    if not FARM.questHere() then Q.why = 'that quest is not offered in this place' return end
     local now = FARM.questNow()
     if now and now ~= Q.want then Q.why = 'another quest is active: ' .. now return end
     if RAID.active() then Q.why = 'the raid is driving' return end
@@ -3806,11 +4168,13 @@ local function confDump()
                     flySpeed = MOVE.flySpeed, walk = MOVE.walk },
         farm    = { on = FARM.on, aggro = FARM.aggro, bail = FARM.bail, resume = FARM.resume,
                     evadeDrop = FARM.evadeDrop, want = farmWant,
+                    noDodge = not FARM.evade,
                     skills = FARM.skills,
                     cam = FARM.cam, camUp = FARM.camUp,
                     camOut = FARM.camOut, camSpin = FARM.camSpin },
         loot    = { on = LOOT.on, map = LOOT.map },
         raid    = { on = RAID.on, wave = RAID.wave },
+        cards   = { on = CARDS.on, skip = CARDS.skip },
         quest   = { on = FARM.quest.on, want = FARM.quest.want },
         tp      = { up = TP.up, cat = TP.cat },
     }
@@ -4253,6 +4617,9 @@ local function buildUi()
     -- Neither a dropdown nor a button shows its own value, so each carries the
     -- current one in its name and repaints it in the callback.
     local farmF = win:folder('Farm')
+    -- One folder, split by dividers: it had grown to twenty-odd controls
+    -- in one run. A divider takes a bare string (see Seoul in CLAUDE.md).
+    farmF:divider('Target')
     FARM.dd = farmF:dropdown({
         name = 'Target: none', elements = {},
         call = function(pick)
@@ -4318,9 +4685,99 @@ local function buildUi()
             confMark()
         end,
     })
+    FARM.btn = farmF:button({
+        name = 'Return point: none',
+        call = function()
+            local char = Me.Character
+            local hrp  = char and char:FindFirstChild('HumanoidRootPart')
+            if not hrp then
+                seoul:notify('No character')
+                return
+            end
+            farmHome = hrp.CFrame
+            local p  = farmHome.Position
+            FARM.btn:modify({ name = fmt('Return point: %d, %d, %d',
+                floor(p.X + 0.5), floor(p.Y + 0.5), floor(p.Z + 0.5)) })
+            seoul:notify('Return point set')
+        end,
+    })
+
+    farmF:divider('Safety')
     -- The resting offset gets no slider: it follows the equipped weapon, so a
     -- control for it would be silently overwritten by the next weapon swap.
     -- The dodge is a free choice on top, so that one keeps its slider.
+    do
+        local maxHp = farmMaxHp()
+        for _, row in { { 'Bail at', 'bail' }, { 'Resume at', 'resume' } } do
+            local hpSl
+            hpSl = farmF:slider({
+                name = row[1] .. ': ' .. FARM[row[2]] .. ' hp', min = 0, max = maxHp,
+                call = function(v)
+                    FARM[row[2]] = v
+                    hpSl:modify({ name = row[1] .. ': ' .. v .. ' hp' })
+                    confMark()
+                end,
+            })
+        end
+    end
+    -- Off switch for the dodge. A trigger that keeps firing - something a
+    -- weapon or effect puts on the target that the filters do not know -
+    -- parks the body `evadeDrop` studs down for the whole fight, and it reads
+    -- as "never goes to the target". `Farm status` names the trigger.
+    confSwitch('farm.noDodge',
+        farmF:toggle({ name = 'Never dodge',
+            call = function(v)
+                FARM.evade = not v
+                confMark()
+            end }),
+        function(v) FARM.evade = not v end)
+    local dropSl
+    dropSl = farmF:slider({
+        name = 'Dodge drop: ' .. FARM.evadeDrop, min = 0, max = 200,
+        call = function(v)
+            FARM.evadeDrop = v
+            dropSl:modify({ name = 'Dodge drop: ' .. FARM.evadeDrop })
+            confMark()
+        end,
+    })
+    -- What the farm is doing, in one line: the question every "it does
+    -- nothing" report starts with, answerable without a console.
+    farmF:button({
+        name = 'Farm status',
+        call = function()
+            local st = FARM_STATE
+            local share = st.frames > 0 and floor(100 * st.dodgeFrames / st.frames + 0.5) or 0
+            seoul:notify(fmt('%s | dodging %d%% | last dodge: %s | loot pin: %s',
+                tostring(st.why), share, tostring(st.dodge or 'none'),
+                (LOOT.spot and 'set' or 'none')))
+        end,
+    })
+    farmF:divider('Camera')
+    -- Farming from under a target buries the body, and the default camera has
+    -- nothing to show from in there. This parks the camera above the target
+    -- instead, locked: while it is on, the mouse does not move the view.
+    confSwitch('farm.cam',
+        farmF:toggle({ name = 'Lock camera on target',
+            call = function(v)
+                FARM.cam = v
+                confMark()
+            end }),
+        function(v) FARM.cam = v end)
+    for _, row in { { 'Camera height', 'camUp', 100 },
+                    { 'Camera distance', 'camOut', 200 },
+                    { 'Camera spin', 'camSpin', 90 } } do
+        local camSl
+        camSl = farmF:slider({
+            name = row[1] .. ': ' .. FARM[row[2]], min = 0, max = row[3],
+            call = function(v)
+                FARM[row[2]] = v
+                camSl:modify({ name = row[1] .. ': ' .. v })
+                confMark()
+            end,
+        })
+    end
+
+    farmF:divider('Loot')
     confSwitch('loot.on',
         farmF:toggle({ name = 'Claim loot',
             call = function(v)
@@ -4338,6 +4795,7 @@ local function buildUi()
                 confMark()
             end }),
         function(v) LOOT.map = v end)
+    farmF:divider('Raid & dungeon')
     -- Drives the farm and the loot run without writing either toggle, so both
     -- pills keep telling the truth about what the user switched on.
     confSwitch('raid.on',
@@ -4356,6 +4814,23 @@ local function buildUi()
                 confMark()
             end }),
         function(v) RAID.wave = v end)
+    -- The dungeon's hands: rewards Fortune > damage > Second Wind, events the
+    -- biggest points multiplier. And the wave skip between floors.
+    confSwitch('cards.on',
+        farmF:toggle({ name = 'Auto pick cards',
+            call = function(v)
+                CARDS.on = v
+                confMark()
+            end }),
+        function(v) CARDS.on = v end)
+    confSwitch('cards.skip',
+        farmF:toggle({ name = 'Auto skip wave',
+            call = function(v)
+                CARDS.skip = v
+                confMark()
+            end }),
+        function(v) CARDS.skip = v end)
+    farmF:divider('Quest')
     -- Keeps one quest in hand and holds the farm off while it is not; the farm
     -- target above is still what gets killed.
     do
@@ -4383,68 +4858,6 @@ local function buildUi()
                 guard(farmTick)
             end }),
         function(v) FARM.quest.on = v end)
-    do
-        local maxHp = farmMaxHp()
-        for _, row in { { 'Bail at', 'bail' }, { 'Resume at', 'resume' } } do
-            local hpSl
-            hpSl = farmF:slider({
-                name = row[1] .. ': ' .. FARM[row[2]] .. ' hp', min = 0, max = maxHp,
-                call = function(v)
-                    FARM[row[2]] = v
-                    hpSl:modify({ name = row[1] .. ': ' .. v .. ' hp' })
-                    confMark()
-                end,
-            })
-        end
-    end
-    local dropSl
-    dropSl = farmF:slider({
-        name = 'Dodge drop: ' .. FARM.evadeDrop, min = 0, max = 200,
-        call = function(v)
-            FARM.evadeDrop = v
-            dropSl:modify({ name = 'Dodge drop: ' .. FARM.evadeDrop })
-            confMark()
-        end,
-    })
-    -- Farming from under a target buries the body, and the default camera has
-    -- nothing to show from in there. This parks the camera above the target
-    -- instead, locked: while it is on, the mouse does not move the view.
-    confSwitch('farm.cam',
-        farmF:toggle({ name = 'Lock camera on target',
-            call = function(v)
-                FARM.cam = v
-                confMark()
-            end }),
-        function(v) FARM.cam = v end)
-    for _, row in { { 'Camera height', 'camUp', 100 },
-                    { 'Camera distance', 'camOut', 200 },
-                    { 'Camera spin', 'camSpin', 90 } } do
-        local camSl
-        camSl = farmF:slider({
-            name = row[1] .. ': ' .. FARM[row[2]], min = 0, max = row[3],
-            call = function(v)
-                FARM[row[2]] = v
-                camSl:modify({ name = row[1] .. ': ' .. v })
-                confMark()
-            end,
-        })
-    end
-    FARM.btn = farmF:button({
-        name = 'Return point: none',
-        call = function()
-            local char = Me.Character
-            local hrp  = char and char:FindFirstChild('HumanoidRootPart')
-            if not hrp then
-                seoul:notify('No character')
-                return
-            end
-            farmHome = hrp.CFrame
-            local p  = farmHome.Position
-            FARM.btn:modify({ name = fmt('Return point: %d, %d, %d',
-                floor(p.X + 0.5), floor(p.Y + 0.5), floor(p.Z + 0.5)) })
-            seoul:notify('Return point set')
-        end,
-    })
 
     -- Teleports. Same two ways in as the farm - pick from a list, or type a
     -- name - over the same tracked set, so anything the ESP can draw is
@@ -4658,6 +5071,7 @@ genv.esp = {
     lootHeld  = function() return LOOT.hold ~= nil end,
     loot      = LOOT,
     raid      = RAID,
+    cards     = CARDS,
     raidState = RAID_STATE,
     quest     = FARM.quest,
     move      = MOVE,
