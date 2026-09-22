@@ -2382,8 +2382,11 @@ LOOT.spot = nil
 -- A kill's drops are claimed before the next engagement, one kill at a time.
 -- With only Auto quest on it used to claim nothing: measured live, 0 claims
 -- across two kills with `Claim loot` off.
+-- Wave farm is deliberately NOT here (requested: "make it so wave farm
+-- doesn't auto claim loot") - only the camp raid drives it; `Claim loot`
+-- still works alongside wave farm when switched on by hand.
 function LOOT.wanted()
-    return LOOT.on or LOOT.map or RAID.active() or (FARM.quest ~= nil and FARM.quest.on) or false
+    return LOOT.on or LOOT.map or RAID.on or (FARM.quest ~= nil and FARM.quest.on) or false
 end
 
 -- The loot hold. A kill arms it, and while it is up NOTHING moves the body
