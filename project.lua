@@ -600,7 +600,9 @@ local FARM = {
     -- For reference, fists were measured separately: damage per 5s was 44 at
     -- 4.5 studs, 33 at 8, 15 at 12 and zero from 16 up, and over a full 300 HP
     -- boss 8 took no damage at all where 4.5 cost 51 HP.
-    under = 7,
+    -- 8 on request (it was 7). Worth knowing: the Cutlass numbers above say a
+    -- katana lands fewer combo steps the further out it sits.
+    under = 8,
     -- `under` is a STARTING offset now, not a constant. Reach is per rig and
     -- the difference is a cliff, not a slope: measured damage per swing at
     -- under = 7 was 3.17 on Sumari, 2.69 on a Hoyuzo Subordinate, 2.58 on
