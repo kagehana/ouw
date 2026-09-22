@@ -686,6 +686,7 @@ local FARM = {
                        -- and back streams more of it, so the dodge never ended.
     evadeMax   = 8.0,  -- ceiling, in case a marker leaks and never dies
     bury       = 3,    -- studs the root keeps under the ground: head below it
+    groundEvery = 0.25, -- seconds between ground casts under a fight target
     evadePart  = 4,    -- a new part this big is a skill hitbox, not the 1-2
                        -- stud markers an M1 leaves behind
     -- Absolute HP, not a fraction, so the sliders read in the same units the
@@ -1025,6 +1026,7 @@ local function farmEngage(rig, root, hum)
     FP.base    = FARM.under
     FP.probeAt, FP.probeSwings = clock(), 0
     FP.lastHp  = hum and hum.Health or nil
+    FP.ground  = nil
     farmEngaged        = true
     farmBeat           = clock()
     FARM_STATE.engaged = true
@@ -1730,13 +1732,26 @@ local function farmStep()
         -- moving away from the target rather than through it.
         local p    = cf.Position
         local sign = FARM.place == 'under' and -1 or 1
-        -- The spot follows the target into the air, always. Holding it below
-        -- the ground was tried (a knocked-up target lifts `under` studs below
-        -- it into open air), and then following only while our own air combo
-        -- held it; both were dropped on request, since staying down loses the
-        -- hits while the target is up and the combo-only rule did not catch
-        -- the knock-ups our own combo causes.
         local spot = vec3(p.X, p.Y + sign * (farmUnder() + drop), p.Z)
+        -- From below, the spot stays UNDER THE GROUND however high the target
+        -- is knocked (requested, 2026-09-21: "back again where we stayed
+        -- underground, and didn't follow them up into the air for combos").
+        -- History: this clamp existed, was dropped on request for following
+        -- the target up (it loses the hits while the target is airborne), and
+        -- is back. A target standing on the ground already puts `under`
+        -- below the surface, so this only bites once it is in the air.
+        -- One cast per `groundEvery` or sideways move, not one per frame.
+        if sign < 0 then
+            local g = FP.ground
+            if not g or clock() - g.t > FARM.groundEvery
+                or (vec3(p.X, 0, p.Z) - g.xz).Magnitude > 2 then
+                g = { t = clock(), xz = vec3(p.X, 0, p.Z), y = FARM.groundBelow(p, 300) }
+                FP.ground = g
+            end
+            if g.y and spot.Y > g.y - FARM.bury then
+                spot = vec3(spot.X, g.y - FARM.bury, spot.Z)
+            end
+        end
         -- Face the target: down from above, up from below. lookAt needs an
         -- explicit up vector here, or a vertical look direction leaves the
         -- default (0,1,0) parallel to it and so degenerate.
