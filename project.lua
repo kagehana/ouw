@@ -1447,6 +1447,8 @@ local function farmRefresh()
     if sig ~= FARM.sig then
         FARM.sig = sig
         FARM.dd:modify({ elements = labels })
+        -- the extras pick from the same list
+        if FARM.alsoDd then FARM.alsoDd:modify({ elements = labels }) end
     end
 end
 
@@ -1492,13 +1494,16 @@ end
 -- still be armed in advance and picked up the moment it appears. This runs
 -- every tick, which is what makes a target survive its own death - the next
 -- Bear Cub simply becomes the one we are farming.
+-- `name` may also be a set of names (name -> true): the nearest live body
+-- answering to ANY of them wins, which is what farming several kinds at once is.
 local function farmPick(name)
-    if type(name) ~= 'string' or name == '' then return end
+    local set = type(name) == 'table'
+    if not set and (type(name) ~= 'string' or name == '') then return end
     local origin = farmHrp and farmHrp.Parent and farmHrp.Position
     local live, liveDist, idle
     for c, d in tracked do
         if FARM_CATS[d.cat] and typeof(c) == 'Instance' and c.Parent
-            and c.Name == name then
+            and (set and name[c.Name] or c.Name == name) then
             local rig, root, hum = farmResolve(c)
             if rig and hum and hum.Health > 0 then
                 local dist = (origin and root)
@@ -1523,6 +1528,26 @@ function FARM.driven()
     return FARM.on or RAID.active() or (FARM.quest ~= nil and FARM.quest.on) or false
 end
 
+-- Farming several kinds at once: the main target plus `FARM.also`, a list of
+-- extra NAMES. Only the plain farm uses the extras - the raid addresses one
+-- camp body at a time and the auto quest one kill code, and each writes
+-- farmWant for itself.
+FARM.also = {}
+function FARM.names()
+    local s = {}
+    if farmWant then s[farmWant] = true end
+    if not RAID.active() and not (FARM.quest ~= nil and FARM.quest.on) then
+        for _, n in FARM.also do s[n] = true end
+    end
+    return s
+end
+function FARM.namesText()
+    local l = {}
+    for n in FARM.names() do l[#l + 1] = n end
+    table.sort(l)
+    return table.concat(l, ', ')
+end
+
 -- FARM_STATE.why exists because every refusal below is silent. A farm that is
 -- switched on and doing nothing is indistinguishable from a broken one, and
 -- "it just would not start" is the single hardest thing to diagnose here.
@@ -1533,7 +1558,8 @@ local function farmTick()
         FARM_STATE.why = 'off'
         return
     end
-    if not farmWant then
+    local names = FARM.names()
+    if not next(names) then
         FARM_STATE.why = 'no target selected'
         return
     end
@@ -1548,16 +1574,16 @@ local function farmTick()
     -- before we had even engaged, which put two players on one mob.
     local raidBody = RAID.active() and farmKey ~= nil and farmResolve(farmKey) ~= nil
     if not (farmKey and typeof(farmKey) == 'Instance' and farmKey.Parent
-        and farmKey.Name == farmWant and (farmEngaged or raidBody)) then
-        local picked = farmPick(farmWant)
+        and names[farmKey.Name] and (farmEngaged or raidBody)) then
+        local picked = farmPick(names)
         if picked ~= farmKey then
             if farmEngaged then farmDisengage(true) end
             farmKey = picked
         end
     end
     if not farmKey then
-        FARM_STATE.why = fmt('nothing named %s is tracked', farmWant)
-        if FARM.seekWhy then FARM.seekWhy(farmWant) end
+        FARM_STATE.why = fmt('nothing named %s is tracked', FARM.namesText())
+        if FARM.seekWhy and farmWant then FARM.seekWhy(farmWant) end
         return
     end
     if not farmBind() then
@@ -1614,7 +1640,7 @@ local function farmTick()
         FARM_STATE.why = 'engaged'
     else
         FARM_STATE.why = 'target is not spawned'
-        if FARM.seekWhy then FARM.seekWhy(farmWant) end
+        if FARM.seekWhy and farmWant then FARM.seekWhy(farmWant) end
     end
 end
 
@@ -4267,8 +4293,148 @@ local MOVE = {
     -- knob that lets the two disagree only produces a flight that does not
     -- work; config is for taste, not for identity.
     noclip   = true,
+    sun      = false,  -- ships false, same reason
+    drown    = false,  -- ships false, same reason
+    steady   = false,  -- anti knockback / ragdoll; ships false, same reason
 }
 local MOVE_STATE = { flying = false, speeding = false, why = 'off', noclip = false }
+
+-- ── sun immunity ─────────────────────────────────────────────────────────────
+-- A Demon's sun damage is decided by the CLIENT: PlayerGui.UCS.Game_Play
+-- .SunDamage raycasts toward the sun itself and tells the server
+-- ToServer('SunDamage', <in sun>) through the SignalFunction module, which the
+-- server believes. So the report is rewritten to false while the switch is on.
+-- Verified live: stood hatless in daylight with it on and took no sun damage.
+-- The original lives ON the module, like the skill aim's, so a re-execute
+-- wraps the real function rather than our last wrapper.
+pcall(function()
+    -- FindFirstChild, not indexing: the harness mock cannot index children
+    local m = RepS
+    for _, n in { 'Communication', 'ServerAndClient', 'Signals', 'SignalFunction' } do
+        m = m and m:FindFirstChild(n)
+    end
+    local C = m and require(m)
+    if type(C) ~= 'table' or type(C.ToServer) ~= 'function' then return end
+    C.__psSun = C.__psSun or C.ToServer
+    local orig = C.__psSun
+    local wrap = function(name, v, ...)
+        if name == 'SunDamage' and v == true and alive and MOVE.sun then v = false end
+        return orig(name, v, ...)
+    end
+    C.ToServer = wrap
+    -- The client only reports on a CHANGE, so a flag already up when the
+    -- switch goes on would never be sent again: clear it outright.
+    MOVE.sunClear = function() pcall(orig, 'SunDamage', false) end
+    MOVE.sunRestore = function()
+        if C.ToServer == wrap then C.ToServer = orig end
+    end
+end)
+
+-- Drowning is the same shape: the character's Swimming script counts its own
+-- breath and reports ToServer('Swim', 'DrownDamage', <amount>) through the
+-- SignalEvent module - the one every event in the game goes through, so the
+-- wrapper drops that single call and passes everything else untouched.
+pcall(function()
+    local m = RepS
+    for _, n in { 'Communication', 'ServerAndClient', 'Signals', 'SignalEvent' } do
+        m = m and m:FindFirstChild(n)
+    end
+    local C = m and require(m)
+    if type(C) ~= 'table' or type(C.ToServer) ~= 'function' then return end
+    C.__psDrown = C.__psDrown or C.ToServer
+    local orig = C.__psDrown
+    local wrap = function(name, kind, ...)
+        if name == 'Swim' and kind == 'DrownDamage' and alive and MOVE.drown then return end
+        return orig(name, kind, ...)
+    end
+    C.ToServer = wrap
+    MOVE.drownRestore = function()
+        if C.ToServer == wrap then C.ToServer = orig end
+    end
+end)
+
+-- The report is only half of it: with just that, the script still ran out of
+-- breath on screen - drowning animation, effects, red flashing (verified live).
+-- Its breath state is one table { DiveStart, Breath, Drowning } that
+-- tickBreath closes over, and Breath is worked out from how long ago DiveStart
+-- was, so holding DiveStart at now keeps the bar full and drowning never
+-- starts. Verified live too. The script is per character, so the table is
+-- found again after every respawn - the tickBreath whose upvalues hold THIS
+-- character - at most once a second while it cannot be found.
+MOVE.breath, MOVE.breathChar, MOVE.breathAt = nil, nil, -1
+function MOVE.breathFind(ch)
+    if type(filtergc) ~= 'function' then return nil end
+    local ok, fns = pcall(filtergc, 'function', { Name = 'tickBreath', IgnoreExecutor = true }, false)
+    if not ok or type(fns) ~= 'table' then return nil end
+    for _, fn in fns do
+        local mine, tbl = false, nil
+        for _, v in debug.getupvalues(fn) do
+            if v == ch then
+                mine = true
+            elseif type(v) == 'table' and rawget(v, 'Breath') ~= nil then
+                tbl = v
+            end
+        end
+        if mine and tbl then return tbl end
+    end
+    return nil
+end
+function MOVE.breathStep()
+    if not MOVE.drown then return end
+    local ch = Me.Character
+    if not ch then return end
+    if MOVE.breathChar ~= ch or not MOVE.breath then
+        if MOVE.breathChar == ch and clock() - MOVE.breathAt < 1 then return end
+        MOVE.breathChar, MOVE.breathAt = ch, clock()
+        MOVE.breath = MOVE.breathFind(ch)
+        if not MOVE.breath then return end
+    end
+    local b = MOVE.breath
+    if b.DiveStart ~= nil then b.DiveStart = clock() end
+    b.Drowning = false
+    -- The script raises SwimDrowning on the character when drowning starts
+    -- and only lowers it on its own drowning -> not-drowning transition, which
+    -- forcing Drowning above skips. Left up, the game's Humanoid_handler holds
+    -- JumpPower at 0: reported live as "prevents me from jumping".
+    if ch:GetAttribute('SwimDrowning') == true then ch:SetAttribute('SwimDrowning', false) end
+end
+
+-- ── anti knockback / ragdoll ────────────────────────────────────────────────
+-- Our character's physics are ours, so the server cannot throw us about
+-- itself: it tells the client to. Knockback is EffectsEvent 'Add_Velocity' ->
+-- Utility.bv, which puts a 'regular_bv' mover on the part (the dash's own is
+-- 'dash_thang_123asd' and is left alone). Ragdoll is the UCS.RagDolling script and the 'change_state' effect
+-- putting the humanoid in Physics/Ragdoll/FallingDown, which RagdollHandler
+-- answers by swapping the joints for constraints; standing the humanoid back
+-- up makes it swap them back. The server's Stun values still refuse attacks
+-- and skills while they last - this keeps us upright and moving, no more.
+MOVE.fallStates = {
+    [Enum.HumanoidStateType.Physics]     = true,
+    [Enum.HumanoidStateType.Ragdoll]     = true,
+    [Enum.HumanoidStateType.FallingDown] = true,
+}
+function MOVE.steadyStep()
+    if not MOVE.steady then return end
+    local ch = Me.Character
+    local hrp = ch and ch:FindFirstChild('HumanoidRootPart')
+    local hum = ch and ch:FindFirstChildOfClass('Humanoid')
+    if not (hrp and hum) or hum.Health <= 0 then return end
+    -- Run live against a scratch part, Utility.bv builds an Attachment named
+    -- 'regular_bv' plus a LinearVelocity named 'Velocity' driven from it:
+    -- take both, and the mover whichever way round it is parented.
+    for _, m in hrp:GetChildren() do
+        local a0 = m:IsA('LinearVelocity') and m.Attachment0
+        if m.Name == 'regular_bv' or (a0 and a0.Name == 'regular_bv') then
+            m:Destroy()
+        end
+    end
+    if MOVE.fallStates[hum:GetState()] then
+        hum.PlatformStand = false
+        hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+    elseif hum.PlatformStand then
+        hum.PlatformStand = false
+    end
+end
 
 -- One table rather than four locals, for the register budget again: `MV.flyAt` is
 -- the point flight holds and is nil whenever flight is not running.
@@ -4447,6 +4613,8 @@ conns[#conns + 1] = Run.Heartbeat:Connect(function(dt)
     -- the ground, so it needs both of the mechanisms flight needs.
     guard(LOOT.pin)
     guard(moveStep, dt)
+    guard(MOVE.breathStep)
+    guard(MOVE.steadyStep)
     -- engaged too: collisions on mid-fight let the ground push us up between
     -- the farm's own writes - 405 surfaced frames in 100s of fighting
     guard(NOCLIP.set, MOVE_STATE.flying or LOOT.spot ~= nil or FARM.parked() ~= nil
@@ -4514,10 +4682,12 @@ local function confDump()
         version = CONF.version,
         esp     = esp,
         tuning  = { maxVisible = TUNING.maxVisible },
-        move    = { fly = MOVE.fly, speed = MOVE.speed,
+        move    = { fly = MOVE.fly, speed = MOVE.speed, sun = MOVE.sun, drown = MOVE.drown,
+                    steady = MOVE.steady,
                     flySpeed = MOVE.flySpeed, walk = MOVE.walk },
         farm    = { on = FARM.on, bail = FARM.bail, resume = FARM.resume,
                     evadeDrop = FARM.evadeDrop, want = farmWant,
+                    also = table.clone(FARM.also),
                     noDodge = not FARM.evade,
                     skills = FARM.skills,
                     cam = FARM.cam, camUp = FARM.camUp,
@@ -4591,6 +4761,16 @@ local function confValues(d)
         FARM.camSpin   = num(d.farm.camSpin, 0, 90, FARM.camSpin)
         if type(d.farm.want) == 'string' and d.farm.want ~= '' then
             farmWant = d.farm.want
+        end
+        -- a list of names; anything that is not a non-empty string is dropped
+        if type(d.farm.also) == 'table' then
+            table.clear(FARM.also)
+            for _, n in d.farm.also do
+                if type(n) == 'string' and n ~= '' and n ~= farmWant
+                    and not table.find(FARM.also, n) and #FARM.also < 20 then
+                    FARM.also[#FARM.also + 1] = n
+                end
+            end
         end
         if type(d.farm.skills) == 'string' then
             local keys = FARM.parseSkills(d.farm.skills)
@@ -4701,6 +4881,9 @@ local function cleanup()
     CAMH.release()
     -- hand the skills their real cursor back
     if FARM.aimRestore then pcall(FARM.aimRestore) end
+    -- and the sun report its real function
+    if MOVE.sunRestore then pcall(MOVE.sunRestore) end
+    if MOVE.drownRestore then pcall(MOVE.drownRestore) end
     -- An RBXScriptConnection has no :Destroy(); :Disconnect() is the teardown,
     -- and every connection this script makes lands in one of four places so
     -- that a re-execute frees all of them: `conns` for world and input signals,
@@ -4961,6 +5144,31 @@ local function buildUi()
             confMark()
         end,
     })
+    local function sunSet(v)
+        MOVE.sun = v
+        if v and MOVE.sunClear then MOVE.sunClear() end
+    end
+    confSwitch('move.sun',
+        g:toggle({ name = 'Sun immunity',
+            call = function(v)
+                sunSet(v)
+                confMark()
+            end }),
+        sunSet)
+    confSwitch('move.drown',
+        g:toggle({ name = 'Drown immunity',
+            call = function(v)
+                MOVE.drown = v
+                confMark()
+            end }),
+        function(v) MOVE.drown = v end)
+    confSwitch('move.steady',
+        g:toggle({ name = 'Anti knock & rag',
+            call = function(v)
+                MOVE.steady = v
+                confMark()
+            end }),
+        function(v) MOVE.steady = v end)
 
     g:button({ name = 'Unload', call = cleanup })
 
@@ -4976,6 +5184,9 @@ local function buildUi()
             if not FARM.labels[pick] then return end
             -- the label IS the name now, so the pick survives that body dying
             farmWant = pick
+            -- the main target is not also an extra
+            local i = table.find(FARM.also, pick)
+            if i then table.remove(FARM.also, i) FARM.alsoPaint() end
             farmKey  = nil
             if farmEngaged then farmDisengage(true) end
             FARM.dd:modify({ name = 'Target: ' .. pick })
@@ -4986,24 +5197,74 @@ local function buildUi()
         end,
     })
     farmF:query({
-        placeholder = 'Target by name...',
+        placeholder = 'Target by name (a, b, c)...',
         call = function(text)
-            local key = farmFind(text)
-            if not key then
-                seoul:notify('No boss or mob matching ' .. tostring(text))
-                return
+            -- Commas farm several kinds at once: the first is the main target,
+            -- the rest go to the extras, replacing them. Every term has to
+            -- match, or nothing changes and the culprit is named.
+            local keys = {}
+            for term in tostring(text or ''):gmatch('[^,]+') do
+                term = term:match('^%s*(.-)%s*$')
+                if term ~= '' then
+                    local key = farmFind(term)
+                    if not key then
+                        seoul:notify('No boss or mob matching ' .. term)
+                        return
+                    end
+                    keys[#keys + 1] = key.Name
+                end
             end
+            if #keys == 0 then return end
             -- keep the NAME the search landed on, not the body: typing
             -- "bear cub" should farm bear cubs, not one particular cub
-            farmWant = key.Name
+            farmWant = keys[1]
+            if #keys > 1 then
+                table.clear(FARM.also)
+                for i = 2, #keys do
+                    if keys[i] ~= farmWant and not table.find(FARM.also, keys[i]) then
+                        FARM.also[#FARM.also + 1] = keys[i]
+                    end
+                end
+                FARM.alsoPaint()
+            end
             farmKey  = nil
             if farmEngaged then farmDisengage(true) end
             FARM.dd:modify({ name = 'Target: ' .. farmWant })
-            seoul:notify('Target: ' .. farmWant)
+            seoul:notify('Targets: ' .. FARM.namesText())
             confMark()
             guard(farmTick)
         end,
     })
+    -- The extras. A dropdown pick ADDS the name; the button clears them all.
+    -- Neither control can show a list, so the dropdown's name carries it.
+    function FARM.alsoPaint()
+        if not FARM.alsoDd then return end
+        local n = #FARM.also
+        FARM.alsoDd:modify({ name = n == 0 and 'Also farm: none'
+            or ('Also farm: ' .. table.concat(FARM.also, ', ')) })
+    end
+    FARM.alsoDd = farmF:dropdown({
+        name = 'Also farm: none', elements = {},
+        call = function(pick)
+            if not FARM.labels[pick] then return end
+            if not farmWant then
+                -- nothing to add to: it becomes the main target
+                farmWant = pick
+                FARM.dd:modify({ name = 'Target: ' .. pick })
+            elseif pick ~= farmWant and not table.find(FARM.also, pick) then
+                FARM.also[#FARM.also + 1] = pick
+            end
+            FARM.alsoPaint()
+            confMark()
+            guard(farmTick)
+        end,
+    })
+    farmF:button({ name = 'Clear extra targets', call = function()
+        table.clear(FARM.also)
+        FARM.alsoPaint()
+        confMark()
+        guard(farmTick)
+    end })
     confSwitch('farm.on',
         farmF:toggle({ name = 'Farm target', call = function(v)
             FARM.on = v
@@ -5350,6 +5611,7 @@ local function buildUi()
     -- Phase two of the config: the switches, now that every pill exists to be
     -- seeded. A saved target is a name, so it survives the body that carried it.
     if farmWant and FARM.dd then FARM.dd:modify({ name = 'Target: ' .. farmWant }) end
+    if FARM.alsoPaint then FARM.alsoPaint() end
     local restored = confSwitches(confSaved)
 
     win:ready()
