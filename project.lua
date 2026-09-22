@@ -877,6 +877,86 @@ local function farmUnder()
     return FP.reach or FARM.under
 end
 
+-- Aim where a RUNNING target will be, not where it is. Reported: "when an
+-- enemy is running, our m1s miss, until they stop running, or we skill and
+-- they're stunned". The server resolves a hit from our REPLICATED position,
+-- which reaches it late, against where the target is by then - so a box
+-- placed under a target we see running lands behind it. Every form of farming
+-- goes through this (farmStep: target, raid, wave, quest, all three
+-- placements).
+-- Velocity is measured from the root's own positions, horizontal only,
+-- smoothed over `leadSmooth`; a jump faster than `leadJump` (a dash, a
+-- teleport, a respawn) or a gap in sampling says nothing about running and
+-- reads as standing; the speed used is capped at `leadMaxSpeed`; under 1 stud
+-- a second is the idle bob, not running.
+-- HOW FAR ahead is computed, not set: lead time = round trip + the swing's
+-- WIND-UP (the equipped preset's `default_before_hit`) + `leadInterp`.
+-- The target we see is half a round trip old and our position reaches the
+-- server half a round trip late; and the server judges the hit when the
+-- swing LANDS, a wind-up later, against where the runner is by then.
+-- The wind-up term was first reasoned away and then measured back in, live
+-- on tower floors 30-37 with claws (wind-up 0.22) at a 56ms round trip - M1s
+-- landed on runners over 12 studs/s:
+--   lead 0.105s (round trip + 0.05)  50% of 22 swings
+--   lead 0.27s                       88% of 8
+--   lead 0.41s                       61% of 18   (overshoots)
+-- and round trip + wind-up = 0.276s is the best row. `leadInterp` is left as
+-- a trim at 0. Round trip from Stats' Data Ping (includes the server frame:
+-- 55ms against GetNetworkPing's 38ms network-only), smoothed, with
+-- GetNetworkPing x2 as the fallback.
+FARM.leadInterp   = 0
+FARM.leadMax      = 0.6
+FARM.leadSmooth   = 0.15
+FARM.leadJump     = 80
+FARM.leadMaxSpeed = 40
+FARM.leadTrack    = setmetatable({}, { __mode = 'k' })
+
+function FARM.leadOffset(root)
+    if not root then return ZERO end
+    local now, p = clock(), root.Position
+    local tr = FARM.leadTrack[root]
+    if not tr then
+        FARM.leadTrack[root] = { pos = p, t = now, vel = ZERO }
+        return ZERO
+    end
+    local dt = now - tr.t
+    if dt > 0 then
+        local d = p - tr.pos
+        local v = vec3(d.X, 0, d.Z) * (1 / dt)
+        if dt > 0.5 or v.Magnitude > FARM.leadJump then v = ZERO end
+        tr.vel = tr.vel + (v - tr.vel) * min(1, dt / FARM.leadSmooth)
+        tr.pos, tr.t = p, now
+    end
+    local lead = FARM.leadTime()
+    if lead <= 0 then return ZERO end
+    local v, speed = tr.vel, tr.vel.Magnitude
+    if speed < 1 then return ZERO end
+    if speed > FARM.leadMaxSpeed then v = v * (FARM.leadMaxSpeed / speed) end
+    return v * lead
+end
+
+-- Seconds of lead for this client's connection, updated at most twice a
+-- second (Stats reads are not free and ping does not move per frame).
+function FARM.leadTime()
+    local now = clock()
+    if FARM.rttAt and now - FARM.rttAt < 0.5 then
+        return min(FARM.leadMax, (FARM.rtt or 0) + FARM.hitDelay() + FARM.leadInterp)
+    end
+    FARM.rttAt = now
+    local ok, ms = pcall(function()
+        return game:GetService('Stats').Network.ServerStatsItem['Data Ping']:GetValue()
+    end)
+    local rtt = ok and type(ms) == 'number' and ms > 0 and ms / 1000 or nil
+    if not rtt then
+        local ok2, one = pcall(function() return Me:GetNetworkPing() end)
+        rtt = ok2 and type(one) == 'number' and one * 2 or nil
+    end
+    if rtt then
+        FARM.rtt = FARM.rtt and (FARM.rtt + (rtt - FARM.rtt) * 0.3) or rtt
+    end
+    return min(FARM.leadMax, (FARM.rtt or 0) + FARM.hitDelay() + FARM.leadInterp)
+end
+
 -- Is this rig one the reach probe is allowed to move? Name match, because the
 -- thing that actually differs is the species and the name is the only handle
 -- on it that survives a respawn.
@@ -1033,13 +1113,17 @@ local function farmEngage(rig, root, hum)
     FARM_STATE.engaged = true
     FARM_STATE.target  = rig
     FARM_STATE.frames, FARM_STATE.dodgeFrames = 0, 0
-    -- a mob we fight is aggro'd already: the chain must not tag it again
-    if FARM.tagged then FARM.tagged[rig] = true end
 end
 
 -- Never writes FARM.on: the toggle owns that value and a pill cannot be
 -- resynced, so a kill has to leave the switch exactly where the user put it.
 local function farmDisengage(goHome)
+    -- The return point is the plain farm's. The raid and wave farm decide
+    -- where the body goes themselves: with a return point set, every WAVE kill
+    -- teleported us home - somewhere off the current dungeon map - once wave
+    -- farm stopped claiming loot (the loot hold used to cancel the trip), and
+    -- the camp raid went home after each camp's loot.
+    if RAID.active() then goHome = false end
     farmEngaged        = false
     FARM_STATE.engaged = false
     FARM_STATE.target  = nil
@@ -1213,6 +1297,15 @@ do
     -- to check against nothing counts - a potion must never be "equipped" as a
     -- weapon on a guess. Read live: Claws is Category 'Weapons', a Cutlass
     -- 'Katana', the Biwa Bell 'Quest Items', potions 'Potions'.
+    -- The equipped preset's wind-up before the hit is judged, for the lead.
+    -- FARM_STATE.preset is set on every swing; before the first, 0.2.
+    function FARM.hitDelay()
+        local P = PRESETS()
+        local p = P and FARM_STATE.preset and P[FARM_STATE.preset]
+        local d = p and (p.default_before_hit or p.default_before_swing)
+        return type(d) == 'number' and d or 0.2
+    end
+
     function FARM.isWeapon(item)
         if not PRESETS() then return false end
         local p = resolve(item)
@@ -1430,55 +1523,6 @@ function FARM.driven()
     return FARM.on or RAID.active() or (FARM.quest ~= nil and FARM.quest.on) or false
 end
 
--- ── aggro chain ─────────────────────────────────────────────────────────────
--- Tag every loaded mob answering to the target's name with ONE registered hit,
--- single file, nearest first, then fight the last one tagged while the rest
--- come to us and pile up - so the combo and the skills land on the whole pile
--- instead of one body at a time. Measured live: with a second tagged Mizunoto
--- walked in beside the one we sat under, both took damage from the same
--- swings, 275 in 20s against ~230 on one alone.
--- "Registered" is the mob's health dropping, not the swing going out: a swing
--- sent before our new position has replicated does nothing, and measured live
--- the first hit on an awake mob landed ~0.35s after arriving. So each tag swings
--- until the hit shows, capped at `tagCap` so a mob that will not take one
--- cannot stall the chain.
--- Tagged is remembered per rig INSTANCE, weakly: a respawned mob is a new
--- instance and gets tagged again, a living one is never tagged twice.
-FARM.aggro   = false   -- ships false: a Seoul toggle cannot be seeded
-FARM.tagCap  = 1.0     -- give up on a mob that will not take a hit by then
-FARM.tagLead = 0.15    -- before the first swing: let our new position replicate
-FARM.tagged  = setmetatable({}, { __mode = 'k' })
-
--- Loaded, living, untagged rigs answering to `name`, nearest-neighbour order
--- from where we stand, so the chain never doubles back.
-function FARM.aggroList(name)
-    local left = {}
-    for c, d in tracked do
-        if FARM_CATS[d.cat] and typeof(c) == 'Instance' and c.Parent and c.Name == name then
-            local rig, root, hum = farmResolve(c)
-            if rig and root and hum and hum.Health > 0 and not FARM.tagged[rig] then
-                left[#left + 1] = { key = c, rig = rig, root = root, hum = hum }
-            end
-        end
-    end
-    local out = {}
-    local at  = farmHrp and farmHrp.Parent and farmHrp.Position
-    while #left > 0 do
-        local bi, bd = 1, math.huge
-        if at then
-            for i, m in left do
-                local dd = (m.root.Position - at).Magnitude
-                if dd < bd then bi, bd = i, dd end
-            end
-        end
-        local m = table.remove(left, bi)
-        out[#out + 1] = m
-        at = m.root.Position
-    end
-    return out
-end
-
-
 -- FARM_STATE.why exists because every refusal below is silent. A farm that is
 -- switched on and doing nothing is indistinguishable from a broken one, and
 -- "it just would not start" is the single hardest thing to diagnose here.
@@ -1564,27 +1608,6 @@ local function farmTick()
 
     -- the target is down or has despawned: go home and wait for it to come back
     if farmEngaged then farmDisengage(true) end
-    -- Aggro chain first, when on: tag every loaded, untagged mob of this name,
-    -- then come back here and engage - farmPick then answers with the last one
-    -- tagged, since that is the one we are standing under.
-    if FARM.aggro and FARM.aggroRun then
-        if FARM_STATE.pulling then
-            FARM_STATE.why = 'aggroing'
-            return
-        end
-        local list = FARM.aggroList(farmWant)
-        if #list > 0 then
-            FARM_STATE.why, FARM_STATE.pulling = fmt('aggroing %d', #list), true
-            task.spawn(function()
-                local ok, lastKey = pcall(FARM.aggroRun, list)
-                FARM_STATE.pulling = false
-                if not ok then warn('[project] aggro: ' .. tostring(lastKey)) end
-                if ok and lastKey then farmKey = lastKey end
-                guard(farmTick)
-            end)
-            return
-        end
-    end
     local rig, root, hum = farmResolve(farmKey)
     if rig then
         farmEngage(rig, root, hum)
@@ -1599,7 +1622,7 @@ local function farmStep()
     if not alive then return end
     -- The loot run owns the body while it is hopping between prompts. Stamp the
     -- beat anyway or the watchdog reads a deliberate pause as a wedge.
-    if FARM_STATE.looting or FARM_STATE.pulling then
+    if FARM_STATE.looting then
         farmBeat = clock()
         return
     end
@@ -1722,16 +1745,21 @@ local function farmStep()
     local cf   = farmRoot.CFrame
     lootAnchor, lootAnchorAt = cf.Position, clock()
     local drop = FARM_STATE.evading and FARM.evadeDrop or 0
+    -- measured every frame so the estimate is warm; not applied mid-dodge,
+    -- which is about getting away from the target, not meeting it
+    local ahead = FARM.leadOffset(farmRoot)
+    if FARM_STATE.evading then ahead = ZERO end
+    FARM_STATE.lead = ahead.Magnitude
     local aim
     if FARM.place == 'behind' then
         -- +Z is a part's back, since LookVector points down -Z
-        local spot = (cf * CFrame.new(0, 0, FARM.behind)).Position - vec3(0, drop, 0)
-        aim = CFrame.lookAt(spot, cf.Position)
+        local spot = (cf * CFrame.new(0, 0, FARM.behind)).Position - vec3(0, drop, 0) + ahead
+        aim = CFrame.lookAt(spot, cf.Position + ahead)
     else
         -- 'above' or 'under'. The dodge pushes further along the same axis, so
         -- from above it goes up and from below it goes down - either way it is
         -- moving away from the target rather than through it.
-        local p    = cf.Position
+        local p    = cf.Position + ahead
         local sign = FARM.place == 'under' and -1 or 1
         local spot = vec3(p.X, p.Y + sign * (farmUnder() + drop), p.Z)
         -- A knocked-up target is FOLLOWED into the air - the hits land while it
@@ -2475,9 +2503,9 @@ function LOOT.pin()
     -- quest talk restored - overwrote the farm's write every frame: the farm
     -- reported engaged while the body sat underground wherever that spot was,
     -- for every target. Reported by a second user as "it never goes to the
-    -- target". A claim and the aggro chain are the only things that may take
-    -- the body mid-engagement, and both say so.
-    if farmEngaged and not (FARM_STATE.looting or FARM_STATE.pulling) then return end
+    -- target". A claim is the only thing that may take the body
+    -- mid-engagement, and it says so.
+    if farmEngaged and not FARM_STATE.looting then return end
     local cf = LOOT.spot or FARM.parked()
     if not cf then return end
     local hrp = tpHrp()
@@ -2501,59 +2529,6 @@ function LOOT.pin()
     end
     hrp.CFrame                 = cf
     hrp.AssemblyLinearVelocity = ZERO
-end
-
--- Runs the chain; returns the tracked key of the last mob tagged. The body is
--- held under each mob, face up like the farm's own pose (the pose the hit is
--- resolved from), through LOOT.spot - the pin with noclip - while
--- FARM_STATE.pulling keeps the farm, loot, quest and movement off it.
-function FARM.aggroRun(list)
-    local prev, last = LOOT.spot, nil
-    -- What each tag did, for FARM_STATE.chain: a chain that silently misses
-    -- looks exactly like one that works until the pile never forms.
-    local began, hits, report = clock(), 0, {}
-    -- One swing rhythm across the whole chain: the server throttles swings
-    -- sent closer than the preset's gap whichever mob they are aimed at, so a
-    -- first swing at the next mob sent just after the one that tagged this
-    -- one is wasted, and the retry costs a whole gap.
-    local lastSwing = -math.huge
-    for _, m in list do
-        if not (alive and FARM.driven() and FARM.aggro) then break end
-        if m.hum.Health > 0 and m.root.Parent then
-            local hp, step = m.hum.Health, 1
-            local start = clock()
-            -- The first swing waits `tagLead` for our new position to reach the
-            -- server. The hit is resolved from our REPLICATED position, so a
-            -- swing sent sooner lands - or misses - from where we were.
-            local nextSwing = max(start + FARM.tagLead, lastSwing + farmGap())
-            local hitAt
-            while clock() - start < FARM.tagCap and alive do
-                local spot = m.root.Position - vec3(0, farmUnder(), 0)
-                LOOT.spot = CFrame.lookAt(spot, spot + UP, BACK)
-                if m.hum.Health < hp or m.hum.Health <= 0 then
-                    hitAt = clock() - start
-                    break
-                end
-                -- Then walk the combo at its own pace until a hit shows: the
-                -- server throttles swings sent faster than the preset's gap.
-                if clock() >= nextSwing then
-                    farmSwing(step, step == 1)
-                    step = step % 5 + 1
-                    lastSwing = clock()
-                    nextSwing = lastSwing + farmGap()
-                end
-                task.wait()
-            end
-            if hitAt then hits += 1 end
-            report[#report + 1] = hitAt and fmt('%.2f', hitAt) or 'miss'
-            FARM.tagged[m.rig] = true
-            last = m.key
-        end
-    end
-    LOOT.spot = prev
-    FARM_STATE.chain = fmt('%d/%d hit in %.2fs [%s]', hits, #report, clock() - began,
-        table.concat(report, ' '))
-    return last
 end
 
 -- the prompt hangs off a part; that part is where we have to stand
@@ -2657,10 +2632,8 @@ local function lootPass()
     -- own rather than needing `Claim loot` on beside it.
     if not LOOT.wanted() then return end
     if FARM_STATE.looting or farmEngaged then return end
-    -- taking a quest owns the body: a claim now would drag us off the NPC;
-    -- so does the aggro chain, which is holding us under each mob in turn
+    -- taking a quest owns the body: a claim now would drag us off the NPC
     if FARM.quest and FARM.quest.busy then return end
-    if FARM_STATE.pulling then return end
     -- What this pass claimed is what tells the tour whether to move on, so it
     -- is reset here rather than in the tour: a pass that finds nothing has to
     -- read as zero, not as whatever the last stop managed.
@@ -3412,6 +3385,10 @@ function CARDS.score(c, events)
     if pts and (t:find('^Grand Trophy') or t:find('^Supreme Trophy')) then
         return 2000 + 1 + min(pts, 99999) / 1e5
     end
+    -- Max Health stat cards ("Max Health +162"): above Second Wind, under the
+    -- Grand/Supreme points above (requested); the bigger one first.
+    n = t:match('^Max Health %+([%d%.]+)')
+    if n then return 2000.5 + min(tonumber(n), 999) / 1e4 end
     if t == 'Second Wind' then return 2000 end
     if pts then return 500 + min(pts, 99999) / 1e5 end
     return 100
@@ -3917,7 +3894,7 @@ function FARM.questAim()
     -- The farm only sees rigs that have streamed in, and a quest's targets are
     -- often across the map. With no live one in view, go to its spawn and let
     -- them load - only while the body is free, and not when already there.
-    if farmEngaged or FARM_STATE.looting or FARM_STATE.pulling or FARM.lootHeld() or RAID.active()
+    if farmEngaged or FARM_STATE.looting or FARM.lootHeld() or RAID.active()
         or clock() < tpHoldUntil or clock() < Q.travelAt then
         return
     end
@@ -3968,7 +3945,7 @@ function FARM.seek(name)
     -- The loot hold too: farmTick reaches here BEFORE its own lootHeld gate
     -- (the "nothing named X" branch), and a kill's loot is claimed before the
     -- body goes anywhere.
-    if farmEngaged or FARM_STATE.looting or FARM_STATE.pulling or FARM.lootHeld()
+    if farmEngaged or FARM_STATE.looting or FARM.lootHeld()
         or clock() < tpHoldUntil then
         return false
     end
@@ -4210,7 +4187,7 @@ function FARM.questPass()
         return
     end
     -- the farm, the loot run and a teleport each own the body; wait them out
-    if farmEngaged or FARM_STATE.looting or FARM_STATE.pulling or FARM.lootHeld()
+    if farmEngaged or FARM_STATE.looting or FARM.lootHeld()
         or clock() < tpHoldUntil then
         Q.why = 'waiting for the body'
         return
@@ -4415,7 +4392,7 @@ local function moveStep(dt)
     -- TP.hold seconds afterwards. Both own the body outright while they run,
     -- so movement stands down rather than fighting over the same property -
     -- the same rule teleports follow, and for the same reason.
-    if farmEngaged or FARM_STATE.looting or FARM_STATE.pulling or FARM.parked() then
+    if farmEngaged or FARM_STATE.looting or FARM.parked() then
         MOVE_STATE.why = 'farm owns the body'
         MV.flyAt = nil
         return
@@ -4539,7 +4516,7 @@ local function confDump()
         tuning  = { maxVisible = TUNING.maxVisible },
         move    = { fly = MOVE.fly, speed = MOVE.speed,
                     flySpeed = MOVE.flySpeed, walk = MOVE.walk },
-        farm    = { on = FARM.on, aggro = FARM.aggro, bail = FARM.bail, resume = FARM.resume,
+        farm    = { on = FARM.on, bail = FARM.bail, resume = FARM.resume,
                     evadeDrop = FARM.evadeDrop, want = farmWant,
                     noDodge = not FARM.evade,
                     skills = FARM.skills,
@@ -5034,14 +5011,6 @@ local function buildUi()
             guard(farmTick)
         end }),
         function(v) FARM.on = v end)
-    -- Before each engagement: one registered hit on every loaded mob of the
-    -- target's name, single file, then fight the last one while they pile in.
-    confSwitch('farm.aggro',
-        farmF:toggle({ name = 'Aggro all first', call = function(v)
-            FARM.aggro = v
-            confMark()
-        end }),
-        function(v) FARM.aggro = v end)
     -- Skill keys, typed in cast order. The box cannot show its own value, so
     -- the placeholder carries the restored one and every submit notifies.
     farmF:query({
@@ -5120,9 +5089,9 @@ local function buildUi()
         call = function()
             local st = FARM_STATE
             local share = st.frames > 0 and floor(100 * st.dodgeFrames / st.frames + 0.5) or 0
-            seoul:notify(fmt('%s | dodging %d%% | last dodge: %s | loot pin: %s',
+            seoul:notify(fmt('%s | dodging %d%% | last dodge: %s | loot pin: %s | lead %.2fs (%.1f studs now)',
                 tostring(st.why), share, tostring(st.dodge or 'none'),
-                (LOOT.spot and 'set' or 'none')))
+                (LOOT.spot and 'set' or 'none'), FARM.leadTime(), st.lead or 0))
         end,
     })
     farmF:divider('Camera')
