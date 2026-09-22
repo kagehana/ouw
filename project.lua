@@ -600,9 +600,9 @@ local FARM = {
     -- For reference, fists were measured separately: damage per 5s was 44 at
     -- 4.5 studs, 33 at 8, 15 at 12 and zero from 16 up, and over a full 300 HP
     -- boss 8 took no damage at all where 4.5 cost 51 HP.
-    -- 8 on request (it was 7). Worth knowing: the Cutlass numbers above say a
-    -- katana lands fewer combo steps the further out it sits.
-    under = 8,
+    -- 7: tried at 6 and at 8 on request, back to 7 both times. The Cutlass
+    -- numbers above say a katana lands fewer combo steps the further out.
+    under = 7,
     -- `under` is a STARTING offset now, not a constant. Reach is per rig and
     -- the difference is a cliff, not a slope: measured damage per swing at
     -- under = 7 was 3.17 on Sumari, 2.69 on a Hoyuzo Subordinate, 2.58 on
@@ -687,6 +687,7 @@ local FARM = {
     evadeMax   = 8.0,  -- ceiling, in case a marker leaks and never dies
     bury       = 3,    -- studs the root keeps under the ground: head below it
     groundEvery = 0.25, -- seconds between ground casts under a fight target
+    stayFloor  = 50,   -- wave farm stays underground from this tower floor on
     evadePart  = 4,    -- a new part this big is a skill hitbox, not the 1-2
                        -- stud markers an M1 leaves behind
     -- Absolute HP, not a fraction, so the sliders read in the same units the
@@ -1733,15 +1734,18 @@ local function farmStep()
         local p    = cf.Position
         local sign = FARM.place == 'under' and -1 or 1
         local spot = vec3(p.X, p.Y + sign * (farmUnder() + drop), p.Z)
-        -- From below, the spot stays UNDER THE GROUND however high the target
-        -- is knocked (requested, 2026-09-21: "back again where we stayed
-        -- underground, and didn't follow them up into the air for combos").
-        -- History: this clamp existed, was dropped on request for following
-        -- the target up (it loses the hits while the target is airborne), and
-        -- is back. A target standing on the ground already puts `under`
-        -- below the surface, so this only bites once it is in the air.
-        -- One cast per `groundEvery` or sideways move, not one per frame.
-        if sign < 0 then
+        -- A knocked-up target is FOLLOWED into the air - the hits land while it
+        -- is up - everywhere except WAVE farm from floor `stayFloor` (50) on,
+        -- where the spot stays UNDER THE GROUND however high it goes
+        -- (requested). Deep floors hit hard (DeepFloor = 50 in the tower's
+        -- own settings: damage and health scale faster from there), so being
+        -- exposed in the air costs more than the hits it buys. A target
+        -- standing on the ground already puts `under` below the surface, so
+        -- the clamp only bites once it is up. One ground cast per
+        -- `groundEvery` or sideways move, not one per frame.
+        local stay = RAID.wave and FARM.towerFloor ~= nil
+            and (FARM.towerFloor() or 0) >= FARM.stayFloor
+        if sign < 0 and stay then
             local g = FP.ground
             if not g or clock() - g.t > FARM.groundEvery
                 or (vec3(p.X, 0, p.Z) - g.xz).Magnitude > 2 then
@@ -3544,6 +3548,18 @@ function CARDS.gearStep(root)
     if g.tries >= CARDS.gearTries or clock() < g.at then return end
     g.at = clock() + CARDS.gearGap
     if CARDS.press(want) then g.tries += 1 end
+end
+
+-- The tower floor from the top bar's "Floor N", for the farm's stay-down
+-- rule. Read at most once a second: the farm asks every frame.
+function FARM.towerFloor()
+    local now = clock()
+    if FARM.floorAt and now - FARM.floorAt < 1 then return FARM.floorN end
+    FARM.floorAt = now
+    local root = CARDS.root()
+    local t = root and CARDS.floorText(root)
+    FARM.floorN = t and tonumber(t:match('(%d+)')) or nil
+    return FARM.floorN
 end
 
 function CARDS.pass()
