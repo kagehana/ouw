@@ -1168,6 +1168,7 @@ end
 local function farmEngage(rig, root, hum)
     if not farmBind() then return end
     farmRig, farmRoot, farmHum = rig, root, hum
+    FARM.fightAt = clock()
     -- the state machine is the only thing that turns collision back on
     if farmMe then farmStateConn = farmMe.StateChanged:Connect(farmPhase) end
     farmWatchSkills(rig)
@@ -1495,6 +1496,15 @@ function FARM.targetOptions()
     end
     -- A pick is always listed, spawned or not, or a saved target that has not
     -- streamed in could never be un-picked.
+    -- Everything with a spawn too, streamed in or not: FARM.seek travels to a
+    -- name the client cannot see, so a mob across the map is as farmable as
+    -- one next to us. Listed after every live body, nearest spawn first.
+    for n, b in FARM.spawnBook() do
+        if FARM_CATS[b.cat] and (near[n] or math.huge) == math.huge then
+            near[n] = 1e7 + (origin and (b.at - origin).Magnitude or 0)
+            if b.cat == 'Boss' then FARM.kinds[n] = 'boss' end
+        end
+    end
     if farmWant then near[farmWant] = near[farmWant] or math.huge end
     for _, n in FARM.also do near[n] = near[n] or math.huge end
     local names = {}
@@ -1608,7 +1618,7 @@ local function farmTick()
     end
     if not farmKey then
         FARM_STATE.why = fmt('nothing named %s is tracked', FARM.namesText())
-        if FARM.seekWhy and farmWant then FARM.seekWhy(farmWant) end
+        if FARM.seekWhy then FARM.seekWhy(names) end
         return
     end
     if not farmBind() then
@@ -1665,7 +1675,7 @@ local function farmTick()
         FARM_STATE.why = 'engaged'
     else
         FARM_STATE.why = 'target is not spawned'
-        if FARM.seekWhy and farmWant then FARM.seekWhy(farmWant) end
+        if FARM.seekWhy then FARM.seekWhy(names) end
     end
 end
 
@@ -2224,7 +2234,29 @@ end
 -- Live geometry if there is any, else the last place we saw it. The second
 -- return says which, because teleporting to a remembered spot is a guess and
 -- the menu should say so.
+-- A player the client cannot see, if they are in a party. The game publishes
+-- every party member's position for its own party markers, map-wide:
+-- `ReplicatedStorage.Player_Service.Parties.<partyId>.<UserId>` carries
+-- `Position` (Vector3, ~5 updates a second while moving, equal to the live
+-- root when read live) and `JobId`, so a member in another server is not
+-- mistaken for one here. Nothing like it exists for a player in no party.
+function TP.partyPos(pl)
+    local svc     = RepS:FindFirstChild('Player_Service')
+    local parties = svc and svc:FindFirstChild('Parties')
+    if not parties then return end
+    local id = tostring(pl.UserId)
+    for _, party in parties:GetChildren() do
+        local m = party:FindFirstChild(id)
+        if m and m:GetAttribute('JobId') == game.JobId then
+            local pos = m:GetAttribute('Position')
+            if typeof(pos) == 'Vector3' then return pos end
+        end
+    end
+end
+
 local function tpPoint(key, d)
+    -- a spawn (TP.spawnKey): always somewhere, streamed in or not
+    if type(key) == 'table' and key.spawn then return key.point end
     d = d or tracked[key]
     if d and d.point then return d.point end
     -- A Player is the stable handle; its Character is swapped out on every
@@ -2236,6 +2268,11 @@ local function tpPoint(key, d)
         local pos = p.Position
         tpLastPos[key] = pos
         return pos
+    end
+    local party = target ~= key and TP.partyPos(key)
+    if party then
+        tpLastPos[key] = party
+        return party
     end
     local last = tpLastPos[key]
     if last then return last, true end
@@ -2283,6 +2320,7 @@ end
 -- prompt's ObjectText beats the instance name (MuzanLairModel -> Muzan) -
 -- before RichText escaping, which a menu row does not want.
 local function tpName(key, d)
+    if type(key) == 'table' and key.spawn then return key.name end
     d = d or tracked[key]
     return (d and d.raw) or (typeof(key) == 'Instance' and key.Name) or tostring(key)
 end
@@ -2290,6 +2328,7 @@ end
 -- A player's key is the Player object rather than its Character, so it is not
 -- in `tracked` and the category cannot be read from there.
 local function tpCat(key)
+    if type(key) == 'table' and key.spawn then return key.cat end
     if typeof(key) == 'Instance' and key:IsA('Player') then return 'Player' end
     local d = tracked[key]
     return d and d.cat
@@ -2314,6 +2353,20 @@ local function tpEach(cat, fn)
     end
 end
 
+-- A name's spawn as a destination, for everything the client has not streamed
+-- in (FARM.spawnBook). One stable key per name, so a pick survives a reopen.
+-- Marked `spawn`: addPoint's keys in `tracked` are tables too.
+TP.spawnKeys = {}
+function TP.spawnKey(name, b)
+    local k = TP.spawnKeys[name]
+    if not k then
+        k = { name = name, spawn = true }
+        TP.spawnKeys[name] = k
+    end
+    k.point, k.cat = b.at, b.cat
+    return k
+end
+
 -- The target list, fetched when it opens, like the farm's.
 function TP.options()
     local hrp     = tpHrp()
@@ -2323,12 +2376,26 @@ function TP.options()
     -- they stay listed and the jump reports the truth. A boss folder with no
     -- rig is a different thing: it does not exist yet.
     local keepAll = TP.cat == 'Player'
+    -- by shown name AND instance name: a prompt's text can differ from the
+    -- name its spawn is filed under
+    local listed  = {}
     tpEach(TP.cat, function(key, name, pos)
         if not (pos or keepAll) then return end
+        listed[name] = true
+        if typeof(key) == 'Instance' then listed[key.Name] = true end
         n += 1
         rows[n] = { key = key, name = name,
                     dist = (origin and pos) and (pos - origin).Magnitude or nil }
     end)
+    -- Map-wide: any name of this kind with a spawn and no body in the list
+    -- goes to its spawn instead. After the live ones, nearest first.
+    for name, b in FARM.spawnBook() do
+        if b.cat == TP.cat and not listed[name] then
+            n += 1
+            rows[n] = { key = TP.spawnKey(name, b), name = name,
+                        dist = 1e7 + (origin and (b.at - origin).Magnitude or 0) }
+        end
+    end
 
     sort(rows, function(a, b)
         if (a.dist == nil) ~= (b.dist == nil) then return b.dist == nil end
@@ -2385,6 +2452,12 @@ local function tpFind(q)
         tpEach(cat, function(key, name, pos)
             offer(key, name, pos, cat == 'Player')
         end)
+    end
+    -- spawns last, so a live body with the same name wins an equal score
+    if bestScore ~= 3 then
+        for name, b in FARM.spawnBook() do
+            offer(TP.spawnKey(name, b), name, b.at)
+        end
     end
     return best
 end
@@ -3792,6 +3865,43 @@ function FARM.questSpawns()
         and m.NpcSpawns or {}
 end
 
+-- Every name the map offers, streamed in or not: name -> { at = spawn, cat }.
+-- The spawn is NpcSpawns'; the kind comes from the ActiveNpcs folders, which
+-- are plain Folders and so replicate map-wide while the rig inside them does
+-- not. Read live in Ouwland: every combat folder's name has a spawn - 110
+-- spawns: 33 bosses (a `BossInfo` in the folder), 16 mob kinds, and 61 with
+-- no folder, the friendly NPCs (cat 'Npc'). Temporary (raid camp) folders
+-- have no spawn and are the raid's to find. Safe from a menu thread: the
+-- require runs apart.
+FARM.book, FARM.bookAt = {}, -math.huge
+function FARM.spawnBook()
+    if clock() - FARM.bookAt < 2 then return FARM.book end
+    local spawns = UIX.apart(FARM.questSpawns)
+    if type(spawns) ~= 'table' then return FARM.book end
+    FARM.bookAt = clock()
+    local book = {}
+    for n, at in spawns do
+        if type(n) == 'string' and typeof(at) == 'Vector3' then
+            book[n] = { at = at, cat = 'Npc' }
+        end
+    end
+    local hums = workspace:FindFirstChild('Humanoids')
+    local regs = hums and hums:FindFirstChild('Regions')
+    for _, reg in regs and regs:GetChildren() or {} do
+        local npcs = reg.Name ~= 'Temporary' and reg:FindFirstChild('ActiveNpcs')
+        for _, f in npcs and npcs:GetChildren() or {} do
+            local b = book[f.Name]
+            if b and f:FindFirstChild('BossInfo') then
+                b.cat = 'Boss'
+            elseif b and b.cat ~= 'Boss' then
+                b.cat = 'Mob'
+            end
+        end
+    end
+    FARM.book = book
+    return book
+end
+
 -- A task's kill code to an NPC name. The code is a server-side id and is NOT
 -- on the live rig anywhere - appearance is randomised and NpcConfig is one
 -- shared module - so this matches by name, each word a prefix of its code
@@ -3970,8 +4080,8 @@ end
 -- Only for the farm's OWN toggle: the raid picks its targets from what is in
 -- range, and the auto quest travels on its own (questAim).
 -- farmTick's refusal line, told apart from a wait that is going to plan
-function FARM.seekWhy(name)
-    local sk = FARM.seek and FARM.seek(name)
+function FARM.seekWhy(names)
+    local sk, name = FARM.seek(names)
     if sk == 'here' then
         FARM_STATE.why = fmt("waiting at %s's spawn for it to stream in", name)
     elseif sk then
@@ -3983,8 +4093,36 @@ FARM.parkJump   = 60    -- moved further than this by someone else: drop the par
 FARM.seekNear   = 150   -- studs from the spawn that count as "there"
 FARM.seekSettle = 8     -- seconds between trips, so a slow stream is waited out
 FARM.seekAt     = 0
-function FARM.seek(name)
-    if not (FARM.on and name) or RAID.active() then return false end
+FARM.seekWait   = 20    -- seconds at a spawn with nothing to fight before the next
+FARM.seekSeen   = {}    -- name -> when we arrived at its spawn
+-- Several names: stay at one spawn until it has gone `seekWait` without a
+-- fight, then go to the one visited longest ago (never first, nearest breaking
+-- ties). One name simply stays: it is the only candidate.
+function FARM.seekPick(names, from)
+    local spawns = FARM.questSpawns()
+    local cur    = FARM.seekName
+    if cur and names[cur] and typeof(spawns[cur]) == 'Vector3' then
+        local seen = FARM.seekSeen[cur]
+        if not seen or clock() - max(seen, FARM.fightAt or seen) < FARM.seekWait then
+            return cur, spawns[cur]
+        end
+    end
+    local best, bestSeen, bestDist
+    for n in names do
+        local at = spawns[n]
+        if typeof(at) == 'Vector3' then
+            local seen = FARM.seekSeen[n] or -math.huge
+            local dist = (at - from).Magnitude
+            if not best or seen < bestSeen or (seen == bestSeen and dist < bestDist) then
+                best, bestSeen, bestDist = n, seen, dist
+            end
+        end
+    end
+    return best, best and spawns[best]
+end
+function FARM.seek(names)
+    if type(names) == 'string' then names = { [names] = true } end
+    if not (FARM.on and type(names) == 'table') or RAID.active() then return false end
     if FARM.quest and FARM.quest.on and FARM.questHere() then return false end
     -- The loot hold too: farmTick reaches here BEFORE its own lootHeld gate
     -- (the "nothing named X" branch), and a kill's loot is claimed before the
@@ -3993,14 +4131,22 @@ function FARM.seek(name)
         or clock() < tpHoldUntil then
         return false
     end
-    local spawn = FARM.questSpawns()[name]
-    local hrp   = tpHrp()
-    if typeof(spawn) ~= 'Vector3' or not hrp then return false end
+    local hrp = tpHrp()
+    if not hrp then return false end
+    local name, spawn = FARM.seekPick(names, hrp.Position)
+    if not name then return false end
+    if name ~= FARM.seekName then
+        FARM.seekName, FARM.seekSeen[name] = name, nil
+        FARM.seekAt = 0
+    end
     -- Horizontal: we wait buried, so the straight-line distance to a spawn on
     -- the surface is never small, and read as "not there yet" it re-travelled.
     local d = hrp.Position - spawn
-    if vec3(d.X, 0, d.Z).Magnitude <= FARM.seekNear then return 'here' end
-    if clock() < FARM.seekAt then return true end
+    if vec3(d.X, 0, d.Z).Magnitude <= FARM.seekNear then
+        FARM.seekSeen[name] = FARM.seekSeen[name] or clock()
+        return 'here', name
+    end
+    if clock() < FARM.seekAt then return true, name end
     FARM.seekAt = clock() + FARM.seekSettle
     -- Asking beats waiting: the stream around our new position comes anyway,
     -- this just starts it before we arrive. Yields, so it gets a thread.
@@ -4014,7 +4160,7 @@ function FARM.seek(name)
     tpGo(spot)
     -- tpGo clears the park; set it after, so the body waits buried here
     FARM.park = spot
-    return true
+    return true, name
 end
 
 -- Gates the farm's next engagement: while we are talking to someone, while
@@ -5436,6 +5582,20 @@ local function buildUi()
             say(tostring(label or '?') .. (tpCat(key) == 'Player'
                 and ' is too far away to locate - get closer'
                 or ' is not spawned'))
+            return
+        end
+        local far = type(key) == 'table' and key.spawn
+        local who = not far and typeof(key) == 'Instance' and key:IsA('Player')
+        if who and not tpPart(key.Character) and TP.partyPos(key) then far = true end
+        if far then
+            -- out of range: ask for the ground first, or the jump lands before
+            -- it and the hold runs out over nothing
+            say('-> ' .. tostring(label or '?') .. (who and ' (party)' or ' (spawn)'))
+            task.spawn(function()
+                pcall(Me.RequestStreamAroundAsync, Me, pos, 5)
+                if alive and not tpGo(pos) then say('No character') end
+            end)
+            if FARM.on then say('Farm is on - it will pull you back') end
             return
         end
         if not tpGo(pos) then
