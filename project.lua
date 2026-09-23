@@ -383,9 +383,14 @@ local function track(c, cat, forced)
           since = clock(), conns = {} }
     tracked[c] = d
     refresh(c, d)
+    -- the farm's hook (UIX because FARM is declared further down): a wanted
+    -- kind streaming in is engaged now, not on the next scan
+    if UIX.onTrack then UIX.onTrack(c) end
 
     local function dirty(x)
         if x:IsA('BasePart') or x:IsA('Model') then d.dirty = true end
+        -- a boss's rig spawns INSIDE its tracked folder
+        if UIX.onTrack and x:IsA('Humanoid') then UIX.onTrack(c) end
     end
     d.conns[1] = c.DescendantAdded:Connect(dirty)
     d.conns[2] = c.DescendantRemoving:Connect(dirty)
@@ -1679,6 +1684,24 @@ local function farmTick()
     end
 end
 
+-- A farmTick soon, coalesced: every caller that wants one sooner than the 1.5s
+-- scan - a wanted rig streaming in, arriving at a spawn, a spawn's wait running
+-- out - lands here, and a burst of them (a pack streaming in at once) costs one.
+function FARM.tickSoon(after)
+    after = after or 0
+    local at = clock() + after
+    if FARM.soonAt and FARM.soonAt >= clock() and FARM.soonAt <= at then return end
+    FARM.soonAt = at
+    task.delay(after, function()
+        if FARM.soonAt == at then FARM.soonAt = nil end
+        if alive then guard(farmTick) end
+    end)
+end
+UIX.onTrack = function(c)
+    if farmEngaged or not FARM.driven() or not FARM.names()[c.Name] then return end
+    FARM.tickSoon(0)
+end
+
 -- The menu's view of the targets: the main one first, then the extras.
 function FARM.targetList()
     local l = {}
@@ -2498,6 +2521,7 @@ local LOOT = {
     hide    = 40,
     probeUp = 200,    -- start the cast this far above the point
     probeDn = 2000,   -- and look this far down for ground
+    floor   = 150,    -- but a hit further below the point is another layer
     -- Depth used when the cast finds NOTHING, which is the normal case for the
     -- first pass at a stop: we cast from outside the area, before it has
     -- streamed. Measured live over a 90s sweep, 8% of the waiting frames had
@@ -2611,8 +2635,16 @@ function LOOT.buried(point)
     end)
     -- No hit means the area has not streamed in yet. Going under the point is
     -- the best guess available, and the next stop re-measures anyway.
-    if ok and hit then y, drop = hit.Position.Y, LOOT.hide end
-    return CFrame.new(vec3(point.X, y - drop, point.Z)), ok and hit ~= nil
+    -- Nor does a hit far below the point: Ouwland keeps `Map.Baseplate` at
+    -- Y ~0 streamed everywhere, under a map that sits at Y 200-1250, so for
+    -- any area not yet streamed the cast landed on it (12 of 13 far spawns
+    -- read live) and we were buried under the baseplate, up to 1200 studs
+    -- below the map - "takes me to random places, far under the map".
+    -- The flag says whether ground was FOUND, and the sweep reads it as "this
+    -- area has streamed", so a rejected hit must not set it.
+    local ground = ok and hit ~= nil and point.Y - hit.Position.Y <= LOOT.floor
+    if ground then y, drop = hit.Position.Y, LOOT.hide end
+    return CFrame.new(vec3(point.X, y - drop, point.Z)), ground
 end
 
 -- Where to hold the body BETWEEN jobs while the farm is driving: the last
@@ -4082,7 +4114,9 @@ end
 -- farmTick's refusal line, told apart from a wait that is going to plan
 function FARM.seekWhy(names)
     local sk, name = FARM.seek(names)
-    if sk == 'here' then
+    if sk == 'here' and FARM.seekIdle then
+        FARM_STATE.why = fmt("waiting at %s's spawn: every target is respawning", name)
+    elseif sk == 'here' then
         FARM_STATE.why = fmt("waiting at %s's spawn for it to stream in", name)
     elseif sk then
         FARM_STATE.why = fmt('travelling to %s: not streamed in here', name)
@@ -4093,31 +4127,59 @@ FARM.parkJump   = 60    -- moved further than this by someone else: drop the par
 FARM.seekNear   = 150   -- studs from the spawn that count as "there"
 FARM.seekSettle = 8     -- seconds between trips, so a slow stream is waited out
 FARM.seekAt     = 0
-FARM.seekWait   = 20    -- seconds at a spawn with nothing to fight before the next
+-- Seconds at a spawn with nothing to fight before the next, counted from the
+-- arrival tick (the teleport hold after landing, 0.65s). Short on purpose:
+-- rigs replicate ~1000 studs out and stream in within 0.6-1.4s of arriving, so
+-- nothing alive in view by then means nothing is there, and the tour comes
+-- back round. Was 20, then 3; "farming should be rather instantaneous".
+FARM.seekWait   = 1.5
+FARM.seekGround = 30    -- ground further than this from a spawn's height is not its
 FARM.seekSeen   = {}    -- name -> when we arrived at its spawn
--- Several names: stay at one spawn until it has gone `seekWait` without a
--- fight, then go to the one visited longest ago (never first, nearest breaking
--- ties). One name simply stays: it is the only candidate.
+FARM.seekTried  = {}    -- name -> looked at and found empty, this round
+FARM.seekRound  = 0     -- when the round began; a fight after it starts a new one
+-- Several names, in rounds (as asked): look at each spawn once, nearest not
+-- yet looked at first, moving on the moment `seekWait` shows nothing there.
+-- When every one has been looked at and all are waiting to respawn, wait at
+-- one: a mob over a boss (a mob comes back sooner), else the nearest - the
+-- one we are at, when we are at one. Any fight ends the round, so after it
+-- every spawn is worth a look again, and so does changing the picks: a name
+-- looked at in an earlier round, then picked again, has not been looked at.
+-- One name is its own whole round: it simply stays.
 function FARM.seekPick(names, from)
     local spawns = FARM.questSpawns()
-    local cur    = FARM.seekName
+    local sig = {}
+    for n in names do sig[#sig + 1] = n end
+    sort(sig)
+    sig = table.concat(sig, '|')
+    if (FARM.fightAt or -math.huge) > FARM.seekRound or sig ~= FARM.seekSig then
+        clear(FARM.seekTried)
+        FARM.seekRound, FARM.seekSig = clock(), sig
+    end
+    local cur = FARM.seekName
     if cur and names[cur] and typeof(spawns[cur]) == 'Vector3' then
         local seen = FARM.seekSeen[cur]
         if not seen or clock() - max(seen, FARM.fightAt or seen) < FARM.seekWait then
             return cur, spawns[cur]
         end
+        FARM.seekTried[cur] = true
     end
-    local best, bestSeen, bestDist
+    local book = FARM.spawnBook()
+    local function boss(n) return book[n] ~= nil and book[n].cat == 'Boss' end
+    local best, bestDist, wait, waitKey
     for n in names do
         local at = spawns[n]
         if typeof(at) == 'Vector3' then
-            local seen = FARM.seekSeen[n] or -math.huge
             local dist = (at - from).Magnitude
-            if not best or seen < bestSeen or (seen == bestSeen and dist < bestDist) then
-                best, bestSeen, bestDist = n, seen, dist
+            if not FARM.seekTried[n] and (not best or dist < bestDist) then
+                best, bestDist = n, dist
             end
+            -- the waiting spot: a boss last, then nearest
+            local key = (boss(n) and 1 or 0) + dist * 1e-7
+            if not wait or key < waitKey then wait, waitKey = n, key end
         end
     end
+    FARM.seekIdle = best == nil and wait ~= nil
+    best = best or wait
     return best, best and spawns[best]
 end
 function FARM.seek(names)
@@ -4144,6 +4206,11 @@ function FARM.seek(names)
     local d = hrp.Position - spawn
     if vec3(d.X, 0, d.Z).Magnitude <= FARM.seekNear then
         FARM.seekSeen[name] = FARM.seekSeen[name] or clock()
+        -- look again the moment the wait runs out, not on the next scan -
+        -- once: past it (one name, nowhere else to go) the scan is enough,
+        -- and re-arming every tick ran the farm 20 times a second
+        local left = max(FARM.seekSeen[name], FARM.fightAt or 0) + FARM.seekWait - clock()
+        if left > 0 then FARM.tickSoon(left + 0.05) end
         return 'here', name
     end
     if clock() < FARM.seekAt then return true, name end
@@ -4155,11 +4222,21 @@ function FARM.seek(names)
     -- the point - on a small streaming radius, too far for a rig on the
     -- surface ever to stream in. The spawn is itself a surface point, so
     -- `hide` under it is as good a guess and stays in range.
+    -- And a hit far from the spawn's own height is not its ground. The cast
+    -- runs 2200 studs down, the map has layers (spawns sit at Y ~1000 and at
+    -- Y 30-290), and with the spawn's area not streamed yet it found a lower
+    -- layer and buried us hundreds of studs under the map - reported as
+    -- "takes me to random places, far under the map". A roof overhead is the
+    -- same mistake upwards: 40 under it can be open air.
     local spot, ground = LOOT.buried(spawn)
-    if not ground then spot = CFrame.new(spawn - vec3(0, LOOT.hide, 0)) end
+    if not ground or abs(spot.Position.Y + LOOT.hide - spawn.Y) > FARM.seekGround then
+        spot = CFrame.new(spawn - vec3(0, LOOT.hide, 0))
+    end
     tpGo(spot)
     -- tpGo clears the park; set it after, so the body waits buried here
     FARM.park = spot
+    -- arrival counts once the hold lets go
+    FARM.tickSoon(TP.hold + 0.05)
     return true, name
 end
 
@@ -4795,6 +4872,392 @@ conns[#conns + 1] = Run.Heartbeat:Connect(function(dt)
         or farmEngaged)
 end)
 
+-- ── shops ─────────────────────────────────────────────────────────
+-- Buying, selling and shrine travel from anywhere. Every NPC action is a verb
+-- on the game's Communication module (`ToServer`, an InvokeServer), and the
+-- server checks WHAT is traded, never where we stand - measured live from
+-- 1300-2750 studs:
+-- * the Black Marketer (`PurchaseSelection`, a cart) sells his rolled stock
+--   while he is up, and for under two minutes after: 20s past his departure
+--   sold, 104s refused. Off-stock is refused and costs nothing.
+-- * Elara (`PurchaseFromShop`, one item) sells this hour's rotation only.
+-- * `SellItems` pays out anywhere, in whatever the item sells for - Silk
+--   Thread and Metal Scraps as often as Wen.
+-- * `TravelShrine` goes to any shrine we have unlocked; a locked one is refused.
+-- Both rotations are seeded by server time in modules the client requires, so
+-- stock and schedule are read, not predicted by hand.
+-- All of it runs game code, which costs a thread the menu (see UIX.apart): the
+-- menu reaches it through UIX.apart, or a task of its own for anything that
+-- yields, and whatever the user should hear goes on `SHOP.said` for the
+-- status loop to show.
+local SHOP = {
+    on    = false,  -- buy wishlist items whenever the Marketer is up
+    want  = {},     -- the wishlist: item names
+    every = 5,      -- seconds between auto-buy looks
+    tries = 3,      -- attempts per item per visit before giving up on it
+    ahead = 3,      -- visits listed in the schedule
+    said  = {},     -- messages from shop tasks, shown by the menu's own thread
+    got   = {},     -- [cycle] = { [item] = true once bought, else attempts }
+    view  = {},     -- what the menu shows, refreshed once a second
+}
+
+function SHOP.say(msg)
+    if #SHOP.said < 20 then SHOP.said[#SHOP.said + 1] = msg end
+end
+
+-- The game's modules, once. Nil until the Communication module is found:
+-- nothing here can act without it, and no path in ReplicatedStorage reaches
+-- it - ShrineUnlock.Travel holds it as an upvalue.
+function SHOP.mods()
+    if SHOP.m then return SHOP.m end
+    local function find(path)
+        local x = RepS
+        for _, n in path do x = x and x:FindFirstChild(n) end
+        return x
+    end
+    local function req(path)
+        local x = find(path)
+        if not x then return nil end
+        local ok, m = pcall(require, x)
+        return ok and type(m) == 'table' and m or nil
+    end
+    local su = req({ 'CAM', 'Client', 'Modules', 'ShrineUnlock' })
+    local comm
+    if su and type(su.Travel) == 'function' and type(getupvalues) == 'function' then
+        for _, u in getupvalues(su.Travel) do
+            if type(u) == 'table' and type(rawget(u, 'ToServer')) == 'function' then comm = u end
+        end
+    end
+    if not comm then return nil end
+    local bm = req({ 'Ouwland', 'Content', 'Misc', 'Npcs', 'Black Marketer' })
+    local el = req({ 'Ouwland', 'Content', 'Mistfall Harbor', 'Npcs', 'Elara' })
+    SHOP.m = {
+        comm   = comm,
+        tv     = req({ 'CAM', 'Global', 'Subsets', 'Gameplay', 'TimedVendor' }),
+        rot    = req({ 'CAM', 'Global', 'Subsets', 'Gameplay', 'RotatingShop' }),
+        shop   = req({ 'CAM', 'Global', 'Shop' }),
+        items  = req({ 'CAM', 'Global', 'Collectibles', 'Items' }),
+        bm     = bm and bm.TimedVendor,
+        tailor = el and el.RotatingShop,
+    }
+    return SHOP.m
+end
+
+function SHOP.send(verb, ...)
+    local m = SHOP.mods()
+    if not m then return false, 'the game modules did not load' end
+    local ok, r = pcall(m.comm.ToServer, verb, ...)
+    if not ok then return false, tostring(r) end
+    return true, r
+end
+
+-- 12345 -> '12,345'
+function SHOP.commas(n)
+    local s = tostring(floor(n))
+    local k
+    repeat s, k = s:gsub('^(-?%d+)(%d%d%d)', '%1,%2') until k == 0
+    return s
+end
+
+-- A price as it reads, or nil for a Robux listing. Those are never offered:
+-- buying one opens a Robux prompt. A stock entry may carry its own price.
+function SHOP.cost(name, entry)
+    local m  = SHOP.mods()
+    local it = m and m.items and m.items[name]
+    local p  = type(entry) == 'table' and entry.Price or (it and it.Price)
+    if type(p) ~= 'table' or p.Product or p.Gamepass then return nil end
+    local t = {}
+    for cur, n in p do
+        if type(n) == 'number' then t[#t + 1] = SHOP.commas(n) .. ' ' .. cur end
+    end
+    table.sort(t)
+    return #t > 0 and concat(t, ' + ') or nil
+end
+
+-- The names in a stock list that can be bought for something other than Robux.
+function SHOP.names(list)
+    local out = {}
+    for _, e in type(list) == 'table' and list or {} do
+        local name = type(e) == 'table' and e.Name or e
+        if type(name) == 'string' and SHOP.cost(name, e) then out[#out + 1] = name end
+    end
+    return out
+end
+
+-- The Marketer's rolled stock for a cycle. `always` false leaves out the items
+-- he carries every visit, which is what the schedule wants.
+function SHOP.stock(cyc, always)
+    local m = SHOP.mods()
+    if not (m and m.tv and m.bm) then return {} end
+    local ok, list = pcall(m.tv.GetStock, m.bm, cyc)
+    local names = SHOP.names(ok and list or nil)
+    if always ~= false then return names end
+    local skip = {}
+    for _, e in m.bm.Always or {} do skip[type(e) == 'table' and e.Name or e] = true end
+    local out = {}
+    for _, n in names do
+        if not skip[n] then out[#out + 1] = n end
+    end
+    return out
+end
+
+-- Up or not, seconds to the next edge (his leaving, or his arrival), and the
+-- cycle whose stock is on offer: this one while he is up, else the next.
+function SHOP.market()
+    local m = SHOP.mods()
+    if not (m and m.tv and m.bm) then return nil end
+    local ok, st = pcall(m.tv.GetState, m.bm)
+    if not ok or type(st) ~= 'table' or type(st.Cycle) ~= 'number' then return nil end
+    local up = st.Active == true
+    return { up = up, left = st.NextEdgeIn or 0, cycle = up and st.Cycle or st.Cycle + 1 }
+end
+
+-- Everything he can ever carry, for the wishlist.
+function SHOP.pool()
+    local m = SHOP.mods()
+    if not (m and m.bm) then return {} end
+    local out = SHOP.names(m.bm.Stock)
+    for _, n in SHOP.names(m.bm.Always) do
+        if not table.find(out, n) then out[#out + 1] = n end
+    end
+    return out
+end
+
+-- The next visits as table rows for the menu - { '03:00', pieces } - with
+-- the wishlist in the accent. While he is here, 'Now' leads with what he has.
+function SHOP.schedule()
+    local m  = SHOP.mods()
+    local mk = SHOP.market()
+    if not (mk and m.tv) then return nil end
+    local ok, every = pcall(m.tv.GetEvery, m.bm)
+    if not ok or type(every) ~= 'number' then return nil end
+    -- one piece per item: the menu's table lays them out whole
+    local function pieces(names)
+        local out = {}
+        for _, n in names do
+            out[#out + 1] = { n, table.find(SHOP.want, n) and 'accent' or 'sub' }
+        end
+        return out
+    end
+    local rows = {}
+    if mk.up then rows[1] = { { { 'Now', 'accent' } }, pieces(SHOP.stock(mk.cycle, false)) } end
+    local first = mk.up and mk.cycle + 1 or mk.cycle
+    for c = first, first + SHOP.ahead - 1 do
+        rows[#rows + 1] = { os.date('%H:%M', c * every), pieces(SHOP.stock(c, false)) }
+    end
+    return rows
+end
+
+-- The schedule's rows as plain text, for a library without tables.
+function SHOP.lines(rows)
+    local out = { 'Next visits' }
+    for _, r in rows do
+        local names = {}
+        for _, p in r[2] do names[#names + 1] = p[1] end
+        local key = type(r[1]) == 'table' and r[1][1][1] or r[1]
+        out[#out + 1] = key .. '  ' .. concat(names, ', ')
+    end
+    return concat(out, '\n')
+end
+
+function SHOP.mmss(s)
+    s = max(0, floor(s))
+    if s >= 3600 then return fmt('%d:%02d:%02d', s // 3600, s // 60 % 60, s % 60) end
+    return fmt('%d:%02d', s // 60, s % 60)
+end
+
+-- Our save slot: Player_Service.Data.<me>.slots.Slot<slotEquipped>.
+function SHOP.slot()
+    local x = RepS
+    for _, name in { 'Player_Service', 'Data', Me.Name } do x = x and x:FindFirstChild(name) end
+    local se    = x and x:FindFirstChild('slotEquipped')
+    local slots = x and x:FindFirstChild('slots')
+    return se and slots and slots:FindFirstChild('Slot' .. tostring(se.Value)), x
+end
+
+function SHOP.wen()
+    local s = SHOP.slot()
+    local w = s and s:FindFirstChild('Wen')
+    return w and w.Value or nil
+end
+
+-- A cart of the Marketer's stock, one of each. Reports and returns whether the
+-- server took it; a refusal says nothing about why, so the likely reason is
+-- given from what we know.
+function SHOP.buyMarket(names, quiet)
+    if #names == 0 then return SHOP.say('Nothing picked') end
+    local cart = {}
+    for _, n in names do cart[n] = 1 end
+    local w0 = SHOP.wen()
+    local ok, r = SHOP.send('PurchaseSelection', cart)
+    local list = concat(names, ', ')
+    if ok and r == true then
+        local w1 = SHOP.wen()
+        SHOP.say('Bought ' .. list .. ((w0 and w1 and w1 < w0) and (' for ' .. SHOP.commas(w0 - w1) .. ' Wen') or ''))
+        return true
+    end
+    if not quiet then
+        local mk = SHOP.market()
+        SHOP.say('Not sold: ' .. list .. ' - ' .. (not ok and r
+            or (mk and not mk.up and 'the Marketer has gone')
+            or 'not in his stock, or not enough to pay'))
+    end
+    return false
+end
+
+-- Elara's rotation this hour.
+function SHOP.tailor()
+    local m = SHOP.mods()
+    if not (m and m.rot and m.tailor) then return {} end
+    local ok, cyc = pcall(m.rot.GetCycleIndex, m.tailor)
+    if not ok then return {} end
+    local ok2, list = pcall(m.rot.GetRotation, m.tailor, cyc)
+    return SHOP.names(ok2 and list or nil)
+end
+
+function SHOP.buyTailor(names)
+    if #names == 0 then return SHOP.say('Nothing picked') end
+    for _, n in names do
+        local w0 = SHOP.wen()
+        local ok = SHOP.send('PurchaseFromShop', n, 1)
+        local w1 = SHOP.wen()
+        -- the reply carries nothing useful; the Wen moving is the receipt
+        if ok and w0 and w1 and w1 < w0 then
+            SHOP.say('Bought ' .. n .. ' for ' .. SHOP.commas(w0 - w1) .. ' Wen')
+        else
+            SHOP.say('Not sold: ' .. n .. ' - out of rotation, not enough Wen, or Elara\'s quest not done')
+        end
+    end
+end
+
+-- What a stack sells for, as it reads ('1 Silk Thread'), or nil if nothing.
+function SHOP.payout(name, n)
+    local m = SHOP.mods()
+    if not (m and m.shop and m.shop.GetSellTotals) then return nil end
+    local ok, tot, count = pcall(m.shop.GetSellTotals, { [name] = n or 1 })
+    if not ok or type(tot) ~= 'table' or (count or 0) == 0 then return nil end
+    local t = {}
+    for cur, v in tot do t[#t + 1] = SHOP.commas(v) .. ' ' .. cur end
+    table.sort(t)
+    return #t > 0 and concat(t, ' + ') or nil
+end
+
+-- Inventory stacks that sell for something. What sits on the toolbar is left
+-- out: the equipped weapon is sellable, and it should not be one click away.
+function SHOP.sellable()
+    local slot = SHOP.slot()
+    local inv  = slot and slot:FindFirstChild('Inventory')
+    inv = inv and inv:FindFirstChild('Inventory')
+    local out, info = {}, {}
+    if not inv then return out, info end
+    local bar = {}
+    for _, n in CARDS.toolbar() do bar[n] = true end
+    for _, it in inv:GetChildren() do
+        local a = it:FindFirstChild('Amount')
+        local n = a and a.Value or 1
+        if n > 0 and not bar[it.Name] then
+            local each = SHOP.payout(it.Name, 1)
+            if each then
+                out[#out + 1] = it.Name
+                info[it.Name] = fmt('x%d · %s each', n, each)
+            end
+        end
+    end
+    table.sort(out)
+    return out, info
+end
+
+-- Sells the WHOLE stack of each name picked.
+function SHOP.sell(names)
+    if #names == 0 then return SHOP.say('Nothing picked') end
+    local slot = SHOP.slot()
+    local inv  = slot and slot:FindFirstChild('Inventory')
+    inv = inv and inv:FindFirstChild('Inventory')
+    local cart, what = {}, {}
+    for _, name in names do
+        local it = inv and inv:FindFirstChild(name)
+        local a  = it and it:FindFirstChild('Amount')
+        local n  = it and (a and a.Value or 1) or 0
+        if n > 0 then
+            cart[name] = n
+            what[#what + 1] = fmt('%s x%d', name, n)
+        end
+    end
+    if #what == 0 then return SHOP.say('None of those are in the inventory') end
+    local pay = {}
+    for name, n in cart do pay[#pay + 1] = SHOP.payout(name, n) end
+    local ok, r = SHOP.send('SellItems', cart)
+    if ok and r ~= nil then
+        SHOP.say('Sold ' .. concat(what, ', ') .. (#pay > 0 and (' for ' .. concat(pay, ', ')) or ''))
+    else
+        SHOP.say('Not sold: ' .. concat(what, ', '))
+    end
+end
+
+-- Shrines we have unlocked: one StringValue, Data.<me>.Archives.Shrines.
+function SHOP.shrines()
+    local _, data = SHOP.slot()
+    local ar = data and data:FindFirstChild('Archives')
+    local v  = ar and ar:FindFirstChild('Shrines')
+    local out = {}
+    if not (v and type(v.Value) == 'string') then return out end
+    for s in v.Value:gmatch('[^,;|]+') do
+        s = s:match('^%s*(.-)%s*$')
+        if s ~= '' then out[#out + 1] = s end
+    end
+    table.sort(out)
+    return out
+end
+
+function SHOP.travel(name)
+    local ok, r = SHOP.send('TravelShrine', name)
+    if not ok then return SHOP.say('Shrine travel failed: ' .. tostring(r)) end
+    SHOP.say('-> ' .. name .. (FARM.on and ' - the farm is on and will pull you back' or ''))
+end
+
+-- Once a second: the menu's readout, and every `every` seconds a look for
+-- wishlist items in his stock. Each item is tried `tries` times a visit, then
+-- left alone - a refusal we cannot explain should not be retried forever.
+function SHOP.tick()
+    local mk = SHOP.market()
+    if not mk then return end
+    local m = SHOP.m
+    local v = SHOP.view
+    if mk.up then
+        v.status = 'Here now - leaves in ' .. SHOP.mmss(mk.left)
+    else
+        local ok, every = pcall(m.tv.GetEvery, m.bm)
+        v.status = fmt('Arrives %s, in %s', ok and os.date('%H:%M', mk.cycle * every) or '?', SHOP.mmss(mk.left))
+    end
+    local wants = concat(SHOP.want, '\0')
+    if v.cycle ~= mk.cycle or v.up ~= mk.up or v.wants ~= wants then
+        v.cycle, v.up, v.wants = mk.cycle, mk.up, wants
+        v.schedule = SHOP.schedule()
+        v.stock    = SHOP.stock(mk.cycle)
+    end
+    if not (SHOP.on and mk.up and #SHOP.want > 0) or clock() - (SHOP.lastBuy or 0) < SHOP.every then return end
+    SHOP.lastBuy = clock()
+    local got = SHOP.got[mk.cycle] or {}
+    SHOP.got = { [mk.cycle] = got }   -- only this visit is remembered
+    for _, n in SHOP.want do
+        if table.find(v.stock or {}, n) and got[n] ~= true and (got[n] or 0) < SHOP.tries then
+            if SHOP.buyMarket({ n }, true) then
+                got[n] = true
+            else
+                got[n] = (got[n] or 0) + 1
+                if got[n] >= SHOP.tries then SHOP.say('Auto buy gave up on ' .. n .. ' this visit') end
+            end
+        end
+    end
+end
+
+task.spawn(function()
+    while alive do
+        guard(SHOP.tick)
+        task.wait(1)
+    end
+end)
+
 -- ── config ────────────────────────────────────────────────────────
 -- Settings the user chose - colours, switches, slider values, keys, the farm
 -- targets - written to JSON in the executor's workspace folder and read back
@@ -4846,6 +5309,7 @@ CONF.plain = {
     { 'cards', 'skip',     CARDS, 'skip' },
     { 'quest', 'on',       FARM.quest, 'on' },
     { 'tp', 'up',          TP, 'up', 0, 60 },
+    { 'shop', 'auto',      SHOP, 'on' },
 }
 -- the keys a user can rebind, by their name in the file
 CONF.keys = { 'menu', 'fly', 'speed', 'farm' }
@@ -4908,6 +5372,7 @@ local function confDump()
     out.farm.skills  = concat(FARM.skillKeys, ',')
     out.quest.want   = FARM.quest.want
     out.tp.cat       = TP.cat
+    out.shop.want    = table.clone(SHOP.want)
     return out
 end
 
@@ -5010,6 +5475,15 @@ local function confLoad(d)
     end
     local tp = sec('tp')
     if tp and type(tp.cat) == 'string' and CFG[tp.cat] then TP.cat = tp.cat end
+    -- the wishlist is names; the auto buy only ever acts on one he stocks
+    local shop = sec('shop')
+    if shop and type(shop.want) == 'table' then
+        local list = {}
+        for _, x in shop.want do
+            if type(x) == 'string' and x ~= '' and not table.find(list, x) then list[#list + 1] = x end
+        end
+        SHOP.want = list
+    end
     return n
 end
 
@@ -5660,6 +6134,144 @@ local function buildUi()
     }))
     number(tp, 'tpUp', 'Height', TP, 'up', { min = 0, max = 60, suffix = ' st' })
 
+    -- The game's own fast travel, from anywhere: the server only checks the
+    -- shrine is unlocked, not where we are or whether we are fighting.
+    local shr = travel:group('Shrines')
+    local shrine
+    bind('shrine', shr:dropdown({
+        name        = 'Shrine',
+        icon        = 'flag',
+        options     = function() return UIX.apart(SHOP.shrines) or {} end,
+        placeholder = 'None',
+        call        = function(pick) shrine = pick end,
+    }))
+    bind('shrineGo', shr:button({
+        name = 'Travel',
+        icon = 'paper-plane-tilt',
+        call = function()
+            if not shrine then
+                say('No shrine selected')
+                return
+            end
+            task.spawn(SHOP.travel, shrine)
+        end,
+    }))
+
+    -- ── shops ──
+    -- Everything here reaches the game's modules, so it runs apart from the
+    -- menu: lists are fetched through UIX.apart, a purchase on a task of its
+    -- own (it waits on the server), and results come back through SHOP.said.
+    -- A describe runs on the menu's thread, so it only reads what the list
+    -- noted while it was fetched.
+    local shops = win:tab('Shops')
+    local noted = {}
+    local function priced(names)
+        for _, n in names do noted[n] = SHOP.cost(n) end
+        return names
+    end
+    local function describe(n) return noted[n] end
+    local function picks(key)
+        local e = el[key]
+        local v = e and e.value
+        return type(v) == 'table' and table.clone(v) or {}
+    end
+
+    local bm = shops:group('Black Marketer')
+    bind('bmStatus', bm:field({ name = 'Status', icon = 'clock', placeholder = 'Unknown here' }))
+    -- a table where the library has one; a copy published before it had
+    -- tables gets the same rows as plain lines rather than no menu at all
+    bind('bmNext', type(bm.table) == 'function'
+        and bm:table({ width = 34, sep = ' · ', empty = 'Schedule unknown here' })
+        or bm:label('Next visits'))
+    -- his stock while he is up, else what he will bring next
+    bind('bmItems', bm:dropdown({
+        name        = 'Stock',
+        icon        = 'tag',
+        multi       = true,
+        options     = function()
+            return UIX.apart(function()
+                local mk = SHOP.market()
+                return priced(mk and SHOP.stock(mk.cycle) or {})
+            end) or {}
+        end,
+        describe    = describe,
+        placeholder = 'None',
+    }))
+    bind('bmBuy', bm:button({
+        name = 'Buy picked',
+        icon = 'shopping-cart-simple',
+        call = function()
+            local list = picks('bmItems')
+            if #list == 0 then return say('Nothing picked') end
+            el.bmItems:set({}, true)
+            task.spawn(SHOP.buyMarket, list)
+        end,
+    }))
+    switch(bm, 'bmAuto', 'Auto buy wishlist', SHOP, 'on', { icon = 'star' })
+    bind('bmWant', bm:dropdown({
+        name        = 'Wishlist',
+        icon        = 'heart',
+        multi       = true,
+        options     = function() return UIX.apart(function() return priced(SHOP.pool()) end) or {} end,
+        describe    = describe,
+        default     = SHOP.want,
+        placeholder = 'None',
+        call        = function(list)
+            SHOP.want = list
+            confMark()
+        end,
+    }), function(e) e:set(SHOP.want, true) end)
+
+    local tailor = shops:group('Elara (tailor)')
+    bind('tailorItems', tailor:dropdown({
+        name        = 'This hour',
+        icon        = 'tag',
+        multi       = true,
+        options     = function() return UIX.apart(function() return priced(SHOP.tailor()) end) or {} end,
+        describe    = describe,
+        placeholder = 'None',
+    }))
+    bind('tailorBuy', tailor:button({
+        name = 'Buy picked',
+        icon = 'shopping-cart-simple',
+        call = function()
+            local list = picks('tailorItems')
+            if #list == 0 then return say('Nothing picked') end
+            el.tailorItems:set({}, true)
+            task.spawn(SHOP.buyTailor, list)
+        end,
+    }))
+
+    -- Whole stacks, at whatever each sells for; the toolbar is never listed.
+    local sell = shops:group('Sell')
+    local worth = {}
+    bind('sellItems', sell:dropdown({
+        name        = 'Items',
+        icon        = 'list',
+        multi       = true,
+        options     = function()
+            local r = UIX.apart(function()
+                local names, info = SHOP.sellable()
+                return { names, info }
+            end)
+            if not r then return {} end
+            worth = r[2]
+            return r[1]
+        end,
+        describe    = function(n) return worth[n] end,
+        placeholder = 'None',
+    }))
+    bind('sellGo', sell:button({
+        name = 'Sell picked (whole stacks)',
+        icon = 'trash',
+        call = function()
+            local list = picks('sellItems')
+            if #list == 0 then return say('Nothing picked') end
+            el.sellItems:set({}, true)
+            task.spawn(SHOP.sell, list)
+        end,
+    }))
+
     -- ── esp ──
     local espT = win:tab('ESP')
     local mk = espT:group('Markers')
@@ -5715,11 +6327,27 @@ local function buildUi()
 
     -- The status line, four times a second; the library only writes the
     -- label when the text changes, and a clock keeps running while it holds.
+    -- The same thread carries the shops' news, because the tasks that trade
+    -- ran game code and can no longer touch the menu themselves.
+    local shown = {}
     task.spawn(function()
         while alive and UI.alive do
             guard(function()
                 local text, timer, idle = UIX.statusLine()
                 win:status(text, { timer = timer, idle = idle })
+            end)
+            guard(function()
+                local v = SHOP.view
+                if v.status and v.status ~= shown.status then
+                    shown.status = v.status
+                    el.bmStatus:set(v.status)
+                end
+                -- a new table only when the visit or the wishlist changed
+                if v.schedule and v.schedule ~= shown.schedule then
+                    shown.schedule = v.schedule
+                    el.bmNext:set(el.bmNext._label and SHOP.lines(v.schedule) or v.schedule)
+                end
+                while #SHOP.said > 0 do say(table.remove(SHOP.said, 1)) end
             end)
             task.wait(0.25)
         end
@@ -5789,6 +6417,7 @@ genv.esp = {
     loot      = LOOT,
     raid      = RAID,
     cards     = CARDS,
+    shop      = SHOP,
     raidState = RAID_STATE,
     quest     = FARM.quest,
     move      = MOVE,
