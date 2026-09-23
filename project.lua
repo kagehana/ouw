@@ -8,7 +8,6 @@ local genv = getgenv()
 
 pcall(function() (genv.project):Destroy() end)
 pcall(function() genv.projectCleanup() end)
-pcall(function() (genv.seoul):Destroy() end)
 
 -- ...and the same thing again, through the DataModel rather than through
 -- getgenv(), because the above CANNOT BE RELIED ON. Two executions do not
@@ -45,8 +44,7 @@ local Me    = Plrs.LocalPlayer
 local WHITE = Color3.new(1, 1, 1)
 local BLACK = Color3.new(0, 0, 0)
 
--- Every flag ships false: a Seoul toggle always starts off and cannot be seeded,
--- so an on default would invert its pill for the whole session.
+-- Every flag ships false: nothing runs until the user switches it on.
 -- Markers fade IN with distance, so anything close stays out of the way. One
 -- band for every category; a category may still override it.
 -- One table rather than twenty locals: the top level sits at Luau's
@@ -127,8 +125,9 @@ K.D_SEP    = '  '
 K.CULL     = 160     -- off-screen slack before a marker is hidden
 K.RELEASE  = 3       -- seconds hidden before a widget returns to the pool
 K.SWEEP    = 1
-K.UI_KEY   = Enum.KeyCode.RightShift
-K.SEOUL    = 'https://github.com/kagehana/seoul/blob/main/seoul.lua?raw=true'
+-- The menu library, loaded rather than vendored. It returns the library
+-- table itself: called ONCE, where Seoul's factory was called twice.
+K.LIB      = 'https://github.com/kagehana/seoul/blob/main/seoul.lua?raw=true'
 
 local floor, clamp, max, min, abs = math.floor, math.clamp, math.max, math.min, math.abs
 local fmt, fromOffset, clock = string.format, UDim2.fromOffset, os.clock
@@ -164,7 +163,12 @@ local function unhook(p)
         playerConns[p] = nil
     end
 end
-local uiGui, alive = nil, true
+-- The menu: the library, its gui, and the keys the user bound. Keys live here
+-- rather than on K because they change at runtime and are saved.
+local UIX, alive = {
+    keys = { menu = Enum.KeyCode.RightShift, fly = Enum.KeyCode.V,
+             speed = Enum.KeyCode.B, farm = nil },
+}, true
 local cam = workspace.CurrentCamera
 
 local ESC = { ['&'] = '&amp;', ['<'] = '&lt;', ['>'] = '&gt;' }
@@ -186,6 +190,26 @@ local function guard(fn, ...)
         end
     end
     return ok, err   -- on success `err` is the call's first return value
+end
+
+-- Running the GAME's Lua - a require, or any function a game module returns -
+-- costs the calling thread its access to our gui. Measured live in Real: after
+-- one call to Skills_Provider.get_current_keys() the thread could still read
+-- and write the workspace, but every access to an instance of the menu threw
+-- "lacking capability Plugin". A coroutine does not contain it - the loss
+-- carries back to the thread that resumed it - but a spawned task does. So
+-- anything the MENU runs that may reach game code comes through here: on a
+-- task of its own, which runs to completion before spawn returns unless the
+-- game code yields, in which case there is no result yet and this returns nil.
+-- A menu thread that skips this breaks its own element on the next draw; the
+-- harness models the loss, so the suite catches one that does.
+function UIX.apart(fn, ...)
+    local ok, v
+    task.spawn(function(...)
+        ok, v = guard(fn, ...)
+    end, ...)
+    if ok then return v end
+    return nil
 end
 
 -- AABB centre and top in the anchor's object space, so a frame costs one CFrame
@@ -526,19 +550,19 @@ end
 -- deals nothing. So farming is a positioning problem - lie under the target and
 -- replay the client's own combo. Everything here no-ops in a game that does not
 -- publish the signal remote, like the places adapter below.
--- The raid controller drives the farm and the loot run, but it must NEVER
--- write their toggles: a Seoul pill cannot be resynced, so a flag written from
--- outside the menu leaves the switch showing the opposite for the session.
--- Both features therefore read `FARM.on or RAID.on` rather than their own flag.
+-- The raid controller drives the farm and the loot run, but it never writes
+-- their toggles: those are the user's choices, and a raid that switched the
+-- farm on would leave it on after the raid stopped. Both features therefore
+-- read `FARM.on or RAID.on` rather than their own flag.
 local RAID = {
-    on     = false,   -- ships false: a Seoul toggle cannot be seeded
+    on     = false,
     -- Wave mode, for places that never let you leave (the Minigames dungeon /
     -- infinite mode): every Temporary rig is fought, bosses included, at any
     -- range, and a cleared room is WAITED in rather than toured away from -
     -- the only Place there is Ouwigahara, and travelling to it mid-run is
     -- exactly wrong. The farm parks the body underground at the last kill,
     -- so the wait is out of sight. Outranks the tour when both are on.
-    wave   = false,   -- ships false: a Seoul toggle cannot be seeded
+    wave   = false,
     radius = 600,     -- a camp this close counts as "here". NPC rigs replicate
                       -- out to about 1000 studs here - bosses read their health
                       -- fine at 975 - so this does not have to be tight.
@@ -578,6 +602,11 @@ local RAID_STATE = { phase = 'off', area = nil, camp = 0, cleared = 0 }
 -- when the current stop began, and what the loot run had claimed when the camp
 -- died - both on the table rather than as locals, for the 200-local ceiling
 RAID.since, RAID.loot = 0, 0
+-- The camp body's NAME while the raid drives the farm. Its own field, never
+-- farmWant: the raid used to write the user's main target and clear it when it
+-- stood down, so every raid ended with the target the user picked gone - and
+-- with the new menu showing it, the row said one thing and the farm another.
+RAID.want = nil
 -- the claim count last seen, and when it last went up
 RAID.seen, RAID.claimAt = 0, 0
 -- Either mode drives the farm and the loot run the same way.
@@ -586,7 +615,7 @@ function RAID.active()
 end
 
 local FARM = {
-    on    = false,   -- ships false: a Seoul toggle cannot be seeded
+    on    = false,
     -- Studs from the target's root, held for the WHOLE engagement. One number
     -- for everything: it does not key on the target (a mob and a boss sit at
     -- the same distance) and it no longer keys on the weapon either.
@@ -644,6 +673,13 @@ local FARM = {
     -- "the smart distance is failing for regular mobs, i'm too close". 7 is
     -- right for nearly everything, so stepping in has to need real evidence.
     probeSwings = 6,
+    -- Any OTHER rig probes too, on a much stricter gate. The list turned out
+    -- not to predict reach: Mizunoe Demon Slayer is a plain 36-part R15, the
+    -- same shape as Hoyuzo Subordinate, and took 0 damage at 7 against 142 in
+    -- 4s at 5 - the farm sat engaged and swinging at nothing, reported as
+    -- "doesn't start attacking, but teleports under them". Twenty barren
+    -- swings in a row is ~7s of nothing, which a rig 7 suits does not do.
+    probeSlowSwings = 20,
     probe    = 2.0,   -- seconds of fruitless swinging before stepping in
     -- 'under', 'above' or 'behind'. Under by default. Above was tried - the
     -- theory being that a target knocked into the air falls back down through
@@ -711,23 +747,20 @@ local FARM = {
     -- property of our parts and the camera collides with the world on its own.
     -- While this is on the camera is ours: the mouse does not move it, it
     -- holds its height and its distance, and it circles at its own pace.
-    -- Ships false: a Seoul toggle cannot be seeded.
     cam     = false,
     camUp   = 15,    -- studs above the target's root
     camOut  = 28,    -- studs back from it, which is what makes the shot an
                      -- angled one rather than a map view straight down
     camSpin = 10,    -- degrees a second around it; 0 holds one fixed angle
-    -- Skill keys, pressed in order after every M1 chain: 'Z,X,C'. Empty means
-    -- M1s only. Keys are sent through VirtualInputManager, so the game's own
+    -- Skill keys, KeyCode names, pressed in order after every M1 chain; empty
+    -- means M1s only. Sent through VirtualInputManager, so the game's own
     -- skill client does the casting exactly as if they were typed - cooldowns
-    -- included, which is why a key on cooldown only costs `skillGap`.
-    skills   = '',
-    skillKeys = {},  -- parsed from `skills`; KeyCode names
+    -- included, which is why a key on cooldown only costs `skillGap`. Saved
+    -- as 'Z,X,C'.
+    skillKeys = {},
     skillHold = 0.1, -- seconds each key is held down
     skillGap  = 0.4, -- seconds between one skill and the next
-    range = 400,     -- how far to list mobs
     scan  = 1.5,     -- seconds between respawn and candidate scans
-    cap   = 50,      -- dropdown entries; all 33 boss folders must fit
 }
 -- The health thresholds are seeded from the character we actually have, once,
 -- at load. This has to happen BEFORE the saved config is applied: it used to
@@ -769,6 +802,50 @@ do
         end
         return keys
     end
+
+    -- The skill bar as the game builds it, read live in Ouwland:
+    -- `CAM.Client.Controllers.Skills_Provider.get_current_keys()` lists what is
+    -- equipped in slot order, and `InputHandler.KeyBinding('Skills_1st')`
+    -- maps each slot to its key with the user's rebinds applied (F Z X C V B N
+    -- K L J by default - most entries carry no `Key` of their own). Returns the
+    -- key names in bar order and fills FARM.skillNames, key -> skill. When the
+    -- game will not say - another place, a changed module - the default bar
+    -- stands in, so the menu always has something to pick from, and whatever is
+    -- already picked stays listed so it can be un-picked.
+    local SLOT = { '1st', '2nd', '3rd', '4th', '5th', '6th', '7th', '8th', '9th', '10th' }
+    local BAR  = { 'F', 'Z', 'X', 'C', 'V', 'B', 'N', 'K', 'L', 'J' }
+    FARM.skillNames = {}
+    function FARM.skillOptions()
+        local keys, seen = {}, {}
+        local function add(k, name)
+            if type(k) == 'string' and k ~= '' and not seen[k] then
+                seen[k] = true
+                keys[#keys + 1] = k
+                if name then FARM.skillNames[k] = name end
+            end
+        end
+        pcall(function()
+            local x = RepS
+            for _, part in { 'CAM', 'Client' } do x = x and x:FindFirstChild(part) end
+            local ctl = x and x:FindFirstChild('Controllers')
+            local cmp = x and x:FindFirstChild('Components')
+            cmp = cmp and cmp:FindFirstChild('Client')
+            local bar   = require(ctl:FindFirstChild('Skills_Provider')).get_current_keys()
+            local input = require(cmp:FindFirstChild('InputHandler'))
+            for i, skill in bar do
+                if not SLOT[i] then break end
+                local ok, k = pcall(input.KeyBinding, 'Skills_' .. SLOT[i])
+                local name = type(skill) == 'table' and skill.Name or nil
+                add((ok and typeof(k) == 'EnumItem' and k.Name)
+                    or (type(skill) == 'table' and skill.Key) or BAR[i], name)
+            end
+        end)
+        if #keys == 0 then
+            for _, k in BAR do add(k) end
+        end
+        for _, k in FARM.skillKeys do add(k) end
+        return keys
+    end
 end
 
 local FARM_CATS   = { Boss = true, Mob = true }
@@ -796,7 +873,7 @@ local farmEngaged   = false
 local FARM_STATE    = { engaged = false, target = nil, retreated = false,
                         evading = false, looting = false, looted = 0,
                         preset = nil, why = 'off', key = nil, reach = nil,
-                        want = nil, probing = false, skill = nil,
+                        want = nil, probing = false,
                         -- what set off the last dodge, and frames engaged /
                         -- frames dodging since the last engage: the one number
                         -- that says whether the dodge is eating the fight
@@ -825,9 +902,7 @@ local lootAnchor, lootAnchorAt = nil, 0
 local farmEvadeConns = {}
 -- weak keys: a marker destroyed mid-skill must not be pinned alive by this
 local farmMarkers    = setmetatable({}, { __mode = 'k' })
---   FARM.dd, FARM.btn: menu elements, nil until the ui builds
-FARM.labels   = {}                  -- label -> tracked key
-FARM.sig      = ''                  -- signature of the list last written
+FARM.kinds    = {}                  -- target name -> 'boss', for the menu
 -- Resolved root per candidate, revalidated by Parent and re-resolved only when
 -- it dies. Weak keys so an untracked target does not pin its rig here.
 local farmRoots     = setmetatable({}, { __mode = 'k' })
@@ -1100,9 +1175,10 @@ local function farmEngage(rig, root, hum)
     -- Start from whatever worked on this kind of enemy last time, else the
     -- configured offset. Clamped, because the slider can move under us.
     -- Only a probable rig gets either: everything else holds the slider.
-    FP.probing = farmProbable(rig.Name)
+    FP.probing = true
+    FP.probeNeed = farmProbable(rig.Name) and FARM.probeSwings or FARM.probeSlowSwings
     FARM_STATE.probing = FP.probing
-    local want  = (FP.probing and REACH_CACHE[rig.Name]) or FARM.under
+    local want  = REACH_CACHE[rig.Name] or FARM.under
     FP.reach   = max(min(want, FARM.under), FARM.underMin)
     FP.base    = FARM.under
     FP.probeAt, FP.probeSwings = clock(), 0
@@ -1115,8 +1191,8 @@ local function farmEngage(rig, root, hum)
     FARM_STATE.frames, FARM_STATE.dodgeFrames = 0, 0
 end
 
--- Never writes FARM.on: the toggle owns that value and a pill cannot be
--- resynced, so a kill has to leave the switch exactly where the user put it.
+-- Never writes FARM.on: the switch is the user's, so a kill has to leave it
+-- exactly where the user put it.
 local function farmDisengage(goHome)
     -- The return point is the plain farm's. The raid and wave farm decide
     -- where the body goes themselves: with a return point set, every WAVE kill
@@ -1384,109 +1460,50 @@ local function farmSwing(step, opener)
         d, false, nil)
 end
 
--- Candidates come from the ESP's own tracked set, so there is no second world
--- scan. A boss folder is tracked from its BossInfo and stays tracked while the
--- rig is despawned, which is exactly the entry you want to arm and wait on.
-local function farmRefresh()
-    if not FARM.dd then return end
-
+-- The farm's list: every Boss and Mob NAME the ESP tracks, nearest spawned
+-- first and unspawned alphabetically after. Candidates come from the ESP's own
+-- tracked set, so there is no second world scan; a boss folder is tracked from
+-- its BossInfo and stays tracked while the rig is despawned, which is exactly
+-- the entry you want to arm and wait on.
+--
+-- Fetched each time the list OPENS. It is never stale, it costs nothing while
+-- closed, and it cannot rebuild under the cursor - Seoul needed a 1.5s rebuild
+-- loop, a signature check and a "never while open" guard to get the same.
+-- There is no cap and no range either: the dropdown searches, so a target
+-- across the map is a few letters away rather than unlisted.
+--
+-- One row per NAME. Names repeat freely (four folders here are called Bandit,
+-- and Bear Cubs come in litters) and a name is the unit of choice: picking a
+-- body bound the farm to one that would be dead a minute later.
+function FARM.targetOptions()
     local origin = farmHrp and farmHrp.Parent and farmHrp.Position
-    local rows, n = {}, 0
+    local near = {}   -- name -> distance to its nearest body, huge if unspawned
     for c, d in tracked do
         if FARM_CATS[d.cat] and typeof(c) == 'Instance' and c.Parent then
-            -- Not d.anchor: the draw loop refreshes geometry only for a category
-            -- that is switched on, and every category ships off, so an anchor
-            -- can be a dead rig's orphaned root long after a respawn. Resolving
-            -- the same way engagement does keeps "(-)" meaning exactly "cannot
-            -- be engaged right now".
+            -- Not d.anchor: the draw loop refreshes geometry only for a
+            -- category that is switched on, and every category ships off, so an
+            -- anchor can be a dead rig's orphaned root long after a respawn.
             local root = farmRoots[c]
             if not (root and root.Parent) then
                 local _, live = farmResolve(c)
-                root         = live
-                farmRoots[c] = live
+                root, farmRoots[c] = live, live
             end
-            local dist
-            if origin and root then
-                dist = (root.Position - origin).Magnitude
-            end
-            if d.cat == 'Boss' or (dist and dist <= FARM.range) then
-                n += 1
-                rows[n] = { key = c, name = c.Name, dist = dist }
-            end
+            local dist = (origin and root) and (root.Position - origin).Magnitude or math.huge
+            if not near[c.Name] or dist < near[c.Name] then near[c.Name] = dist end
+            if d.cat == 'Boss' then FARM.kinds[c.Name] = 'boss' end
         end
     end
-
-    sort(rows, function(a, b)
-        if (a.dist == nil) ~= (b.dist == nil) then return b.dist == nil end
-        if a.dist and b.dist and a.dist ~= b.dist then return a.dist < b.dist end
-        return a.name < b.name
+    -- A pick is always listed, spawned or not, or a saved target that has not
+    -- streamed in could never be un-picked.
+    if farmWant then near[farmWant] = near[farmWant] or math.huge end
+    for _, n in FARM.also do near[n] = near[n] or math.huge end
+    local names = {}
+    for n in near do names[#names + 1] = n end
+    sort(names, function(x, y)
+        if near[x] ~= near[y] then return near[x] < near[y] end
+        return x < y
     end)
-
-    -- One row per NAME. The distance still decides the ORDER - nearest spawned
-    -- first, unspawned alphabetically after - but it stays out of the label, so
-    -- the list only churns when the set of names changes rather than every time
-    -- we move. Names repeat freely (four folders here are called Bandit, and
-    -- Bear Cubs come in litters) and they used to get `#2`, `#3` suffixes:
-    -- four rows that all meant "a bear cub", where picking one bound the farm
-    -- to a single body that would be dead a minute later. A name is the right
-    -- unit of choice, so duplicates collapse and the FIRST row wins - which,
-    -- given the sort above, is the nearest spawned one.
-    clear(FARM.labels)
-    local labels, seen = {}, {}
-    for i = 1, n do
-        local r = rows[i]
-        if not seen[r.name] then
-            seen[r.name] = true
-            labels[#labels + 1] = r.name
-            FARM.labels[r.name]  = r.key
-            if #labels >= FARM.cap then break end
-        end
-    end
-
-    local sig = concat(labels, '\0')
-    if sig ~= FARM.sig then
-        FARM.sig = sig
-        FARM.dd:modify({ elements = labels })
-        -- the extras pick from the same list
-        if FARM.alsoDd then FARM.alsoDd:modify({ elements = labels }) end
-    end
-end
-
--- Typed lookup. Ranked so 'zuko' beats a substring hit elsewhere, and among
--- equal matches the nearest one wins; searches `tracked` rather than the
--- dropdown so it reaches targets past the list cap too.
-local function farmFind(q)
-    if type(q) ~= 'string' then return end
-    q = q:lower():match('^%s*(.-)%s*$')
-    if q == '' then return end
-
-    local origin = farmHrp and farmHrp.Parent and farmHrp.Position
-    local best, bestScore, bestDist
-    for c, d in tracked do
-        if FARM_CATS[d.cat] and typeof(c) == 'Instance' and c.Parent then
-            local name = c.Name:lower()
-            local score
-            if name == q then score = 3
-            elseif name:sub(1, #q) == q then score = 2
-            elseif name:find(q, 1, true) then score = 1 end
-
-            if score then
-                local root = farmRoots[c]
-                if not (root and root.Parent) then
-                    local _, liveRoot = farmResolve(c)
-                    root         = liveRoot
-                    farmRoots[c] = liveRoot
-                end
-                local dist = (origin and root)
-                    and (root.Position - origin).Magnitude or math.huge
-                if not best or score > bestScore
-                    or (score == bestScore and dist < bestDist) then
-                    best, bestScore, bestDist = c, score, dist
-                end
-            end
-        end
-    end
-    return best
+    return names
 end
 
 -- A name to the body that should answer to it right now: nearest spawned wins,
@@ -1519,8 +1536,8 @@ end
 
 -- Whether anything has asked the farm to fight: its own toggle, the raid, or
 -- the auto quest. The raid and the quest DRIVE the farm rather than writing
--- FARM.on - a Seoul pill cannot be resynced, so a flag written from outside the
--- menu would leave the Farm switch lying for the session. Auto quest used to
+-- FARM.on - the switch is the user's, and one flipped by a controller stays
+-- flipped after that controller stops. Auto quest used to
 -- need Farm target switched on beside it and, with only itself on, held the
 -- quest and never swung - reported as "doesn't seem to actually start
 -- attacking the targets".
@@ -1529,14 +1546,18 @@ function FARM.driven()
 end
 
 -- Farming several kinds at once: the main target plus `FARM.also`, a list of
--- extra NAMES. Only the plain farm uses the extras - the raid addresses one
--- camp body at a time and the auto quest one kill code, and each writes
--- farmWant for itself.
+-- extra NAMES. Only the plain farm uses the extras. The raid addresses one
+-- camp body at a time by a name of its own (RAID.want), and the auto quest one
+-- kill code, which it writes into farmWant.
 FARM.also = {}
 function FARM.names()
     local s = {}
+    if RAID.active() then
+        if RAID.want then s[RAID.want] = true end
+        return s
+    end
     if farmWant then s[farmWant] = true end
-    if not RAID.active() and not (FARM.quest ~= nil and FARM.quest.on) then
+    if not (FARM.quest ~= nil and FARM.quest.on) then
         for _, n in FARM.also do s[n] = true end
     end
     return s
@@ -1553,14 +1574,18 @@ end
 -- "it just would not start" is the single hardest thing to diagnose here.
 local function farmTick()
     FARM_STATE.key = farmKey
-    FARM_STATE.want = farmWant
+    FARM_STATE.want = RAID.active() and RAID.want or farmWant
     if not FARM.driven() then
         FARM_STATE.why = 'off'
         return
     end
     local names = FARM.names()
     if not next(names) then
+        -- Cleared mid-fight: let go of the body we were under. Seoul's menu
+        -- could not deselect a target, so this was only reachable through the
+        -- API; the new list's Clear makes it one click.
         FARM_STATE.why = 'no target selected'
+        if farmEngaged then farmDisengage(true) end
         return
     end
     -- Re-resolve the name every tick. A body that died or despawned is simply
@@ -1642,6 +1667,39 @@ local function farmTick()
         FARM_STATE.why = 'target is not spawned'
         if FARM.seekWhy and farmWant then FARM.seekWhy(farmWant) end
     end
+end
+
+-- The menu's view of the targets: the main one first, then the extras.
+function FARM.targetList()
+    local l = {}
+    if farmWant then l[1] = farmWant end
+    for _, n in FARM.also do
+        if n ~= farmWant then l[#l + 1] = n end
+    end
+    return l
+end
+
+-- From the menu: the first name is the main target, the rest are extras. A
+-- fight in progress is left alone while its name is still wanted - adding an
+-- extra must not drop the boss we are under - and the tick re-picks otherwise.
+function FARM.setTargets(list)
+    farmWant = nil
+    clear(FARM.also)
+    for _, n in type(list) == 'table' and list or {} do
+        if type(n) == 'string' and n ~= '' then
+            if not farmWant then
+                farmWant = n
+            elseif n ~= farmWant and not table.find(FARM.also, n) and #FARM.also < 20 then
+                FARM.also[#FARM.also + 1] = n
+            end
+        end
+    end
+    guard(farmTick)
+end
+
+-- Anything else that changes the targets repaints the menu through this.
+function FARM.paintTargets()
+    if UIX.repaint then UIX.repaint('targets') end
 end
 
 local function farmStep()
@@ -1756,7 +1814,7 @@ local function farmStep()
             REACH_CACHE[farmRig and farmRig.Name or '?'] = FP.reach
             FP.probeAt, FP.probeSwings = clock(), 0
         elseif clock() - FP.probeAt > FARM.probe
-            and FP.probeSwings >= FARM.probeSwings then
+            and FP.probeSwings >= (FP.probeNeed or FARM.probeSwings) then
             if FP.reach > FARM.underMin then
                 FP.reach = max(FARM.underMin, FP.reach - 1)
             end
@@ -1828,7 +1886,7 @@ conns[#conns + 1] = Run.Heartbeat:Connect(function() guard(farmStep) end)
 
 -- One pass of the client's own combo, split out so the loop can run it through
 -- guard(): an error in the loop body would otherwise kill the thread and stop
--- the farm swinging for the rest of the session with the pill still green.
+-- the farm swinging for the rest of the session with the switch still on.
 local function farmCombo()
     if not (FARM.driven() and farmEngaged and farmHum
         and farmHum.Health > 0 and not FARM_STATE.evading) then
@@ -1873,7 +1931,6 @@ local function farmCombo()
         if not farmHum or farmHum.Health <= 0 then break end
         if Input:GetFocusedTextBox() then break end
         local code = Enum.KeyCode[name]
-        FARM_STATE.skill = name
         vim:SendKeyEvent(true, code, false, game)
         task.wait(FARM.skillHold)
         vim:SendKeyEvent(false, code, false, game)
@@ -1963,9 +2020,6 @@ local function farmScan()
     -- where we are - and let the tick below build a fresh one. Recovering
     -- blindly beats sitting there looking switched on.
     if farmEngaged and clock() - farmBeat > 1 then farmDisengage(false) end
-    -- The list is not rebuilt mid-fight: pinned under a target every
-    -- distance changes constantly, and each rebuild reclones every row.
-    if not farmEngaged then farmRefresh() end
     farmTick()
 end
 
@@ -2111,12 +2165,9 @@ local TP = {
                      -- does and one write drops us through the empty cell;
                      -- re-writing also outlasts a server correction.
     cap  = 60,       -- dropdown entries
-    scan = 1.5,      -- seconds between list rebuilds
 }
 
-local tpDd, tpCatDd              -- menu elements, nil until the ui builds
-TP.labels = {}                   -- label -> tracked key
-TP.sig    = ''                   -- signature of the list last written
+TP.labels = {}                   -- label -> tracked key, as the list last showed
 local tpKey                      -- selected tracked key
 TP.token  = 0                    -- cancels a hold left over from an earlier jump
 -- When the hold above stops re-writing our CFrame. Movement reads it: a jump
@@ -2263,8 +2314,8 @@ local function tpEach(cat, fn)
     end
 end
 
-local function tpRefresh()
-    if not tpDd then return end
+-- The target list, fetched when it opens, like the farm's.
+function TP.options()
     local hrp     = tpHrp()
     local origin  = hrp and hrp.Position
     local rows, n = {}, 0
@@ -2303,11 +2354,7 @@ local function tpRefresh()
         TP.labels[label] = rows[i].key
     end
 
-    local sig = concat(labels, '\0')
-    if sig ~= TP.sig then
-        TP.sig = sig
-        tpDd:modify({ elements = labels })
-    end
+    return labels
 end
 
 -- Typed lookup across EVERY category, not just the one on display: exact >
@@ -2342,15 +2389,6 @@ local function tpFind(q)
     return best
 end
 
--- Its own loop rather than a second pass inside the farm's: a broken list must
--- never be able to stop the farm engaging, and vice versa.
-task.spawn(function()
-    while alive do
-        guard(tpRefresh)
-        task.wait(TP.scan)
-    end
-end)
-
 -- ── loot ────────────────────────────────────────────────────────────────────
 -- Verified in Ouwland: a chest is `Workspace.Chests.<name>` carrying a
 -- ProximityPrompt (`Open`, T, hold 0), and firing it **destroys that prompt**
@@ -2362,7 +2400,7 @@ end)
 -- this executor's `fireproximityprompt` takes no duration, so a hold is handled
 -- by firing again until the prompt goes away rather than by passing a number.
 local LOOT = {
-    on      = false,  -- ships false: a Seoul toggle cannot be seeded
+    on      = false,
     folders = { 'LootDrops', 'Chests' },
     range   = 500,    -- studs from us OR from where the target died
     anchor  = 90,     -- seconds the death anchor stays valid
@@ -2417,7 +2455,7 @@ local LOOT = {
     -- has StreamingEnabled, so a chest on the far side of the map does not
     -- exist on the client at all - the only way to reach one is to go there,
     -- which is why this is a tour and not a bigger number.
-    map     = false,  -- ships false: a Seoul toggle cannot be seeded
+    map     = false,
     -- How long a stop lasts. `dwell` is only the CAP: the stop ends as soon as
     -- the ground is under us and `ready` has passed, which is almost always.
     -- Measured live across all ten Ouwland regions, teleporting in cold:
@@ -2436,7 +2474,7 @@ LOOT.spot = nil
 
 -- Whether anything wants loot claimed: `Claim loot`, the map sweep, the raid
 -- (the chest its camp guards), or the auto quest - which DRIVES the loot run
--- the way the raid does, never writing LOOT.on, so the pill stays the user's.
+-- the way the raid does, never writing LOOT.on, so the switch stays the user's.
 -- A kill's drops are claimed before the next engagement, one kill at a time.
 -- With only Auto quest on it used to claim nothing: measured live, 0 claims
 -- across two kills with `Claim loot` off.
@@ -2919,9 +2957,9 @@ end
 -- unseal, a prompt whose part never arrives - because that prompt is still
 -- there on every pass. A pass that claims nothing means this stop is done.
 --
--- It writes no toggle. The farm's and the raid's pills are theirs, and a Seoul
--- pill cannot be resynced, so a controller that flipped one would leave it
--- lying for the session - the same rule the raid already follows.
+-- It writes no toggle. The farm's and the raid's switches are the user's, and
+-- a controller that flipped one would leave it flipped after it stopped - the
+-- same rule the raid already follows.
 function LOOT.tour()
     local s = LOOT.sweep
     -- Standing down means giving the body back: the pin and the hide spot are
@@ -3057,7 +3095,6 @@ function RAID.waveTarget(mobs)
         if m.key == farmKey then cur = m end
         if m.by == nil and not free then free = m end
     end
-    RAID_STATE.shared = cur ~= nil and cur.by ~= nil
     if cur then
         if cur.by ~= nil and free and me > cur.by then return free.key end
         return cur.key
@@ -3071,7 +3108,8 @@ local function raidPass()
             RAID_STATE.phase, RAID_STATE.area = 'off', nil
             -- hand the body back; the farm's own toggle decides what happens
             -- next, and we never wrote it
-            if farmKey and RAID.fought then farmWant, farmKey = nil, nil end
+            if farmKey and RAID.fought then farmKey = nil end
+            RAID.want = nil
             RAID.fought = false
         end
         return
@@ -3118,8 +3156,8 @@ local function raidPass()
             -- camp share a name and it works through them one at a time, so
             -- the name goes in beside the body to keep farmTick's re-pick
             -- pointed at the same one
-            farmKey  = best
-            farmWant = best.Name
+            farmKey   = best
+            RAID.want = best.Name
             if farmEngaged then farmDisengage(false) end
             guard(farmTick)
         end
@@ -3127,8 +3165,8 @@ local function raidPass()
     end
 
     -- Nothing alive in range.
-    if farmKey or farmWant then
-        farmWant, farmKey = nil, nil
+    if farmKey or RAID.want then
+        RAID.want, farmKey = nil, nil
         if farmEngaged then farmDisengage(false) end
     end
     if RAID.fought then
@@ -3239,7 +3277,7 @@ end)
 -- rewards - Fortune, then damage, then Second Wind; events - the biggest
 -- one-floor multiplier, and the Skip card when nothing multiplies.
 local CARDS = {
-    on     = false,   -- ships false: a Seoul toggle cannot be seeded
+    on     = false,
     skip   = false,   -- press the wave skip between floors
     tick   = 0.25,
     wait   = 0.4,     -- a hand must have been up this long: slots fill in
@@ -3647,7 +3685,7 @@ end)
 --
 -- Everything hangs off FARM: the top level has no local headroom.
 FARM.quest = {
-    on    = false,   -- ships false: a Seoul toggle cannot be seeded
+    on    = false,
     want  = nil,     -- quest key, e.g. 'Ill take 3 bandits'
     why   = 'off',
     busy  = false,
@@ -3657,7 +3695,8 @@ FARM.quest = {
     -- a task named like this is a trip back to someone, not a kill
     turnVerbs = { '^return', '^report', '^bring', '^deliver', '^speak', '^go talk', '^talk' },
     wait  = 3,       -- cap on the prompt streaming in, and on the confirm
-    talk  = 6,       -- cap on the dialogue reaching our option
+    talk  = 6,       -- cap on the dialogue going this long without a new line
+    talkMax = 40,    -- hard cap on one conversation, however long it talks
     click = 0.5,     -- seconds between clicks through an NPC's opening line
     back  = 5,       -- seconds between failed attempts
     -- After this many failures in a row it stops trying and stops holding the
@@ -3669,11 +3708,10 @@ FARM.quest = {
     near     = 150,  -- studs from a target's spawn that count as "there"
     settle   = 8,    -- seconds after travelling before travelling again
     travelAt = 0,
-    dd     = nil,    -- the menu's quest dropdown, and the order it shows
-    sig    = nil,
-    relist = 3,      -- seconds between re-sorting it by distance
-    band   = 250,    -- studs per distance band the sort compares
-    listAt = 0,
+    -- The menu's list is nearest giver first, in bands of this many studs, so
+    -- it only reorders when we change area rather than on every step.
+    band   = 250,
+    givers = {},     -- quest key -> the NPC offering it, noted as the list is read
 }
 
 function FARM.questDb()
@@ -3713,6 +3751,7 @@ function FARM.questList()
         if type(info) == 'table' and type(info.OfferNpc) == 'string'
             and not (done and done:FindFirstChild(key)) then
             list[#list + 1] = key
+            FARM.quest.givers[key] = info.OfferNpc
             local at = typeof(info.Position) == 'Vector3' and info.Position
                 or spawns[info.OfferNpc]
             -- banded, so the order only moves when we change area rather
@@ -3726,27 +3765,6 @@ function FARM.questList()
         return a < b
     end)
     return list
-end
-
--- Repaint the menu's quest list when its ORDER changed. `modify({elements})`
--- destroys and reclones every row, so only on a real change - it is the order
--- that moves as we do, and it moves only when we pass one giver for another.
-function FARM.questRelist()
-    local Q = FARM.quest
-    if not Q.dd then return end
-    -- Never while the list is OPEN. A rebuild destroys every row and the list
-    -- snaps back to the top, so the row under the cursor changes between
-    -- looking and clicking - reported as "it's accepting the first quest
-    -- instead of the one chosen". Seoul opens a dropdown by tweening its frame
-    -- from 18 to 67 px tall; anything taller than closed counts as open.
-    local frame = Q.dd._instance
-    if frame and frame.Size.Y.Offset > 18 then return end
-    local list = FARM.questList()
-    local sig  = table.concat(list, '\n')
-    if sig ~= Q.sig then
-        Q.sig = sig
-        Q.dd:modify({ elements = list })
-    end
 end
 
 -- The key of the quest we hold and its instance, or nil. nil also when the
@@ -3914,7 +3932,7 @@ function FARM.questAim()
     if name ~= farmWant then
         farmWant, farmKey = name, nil
         if farmEngaged then farmDisengage(true) end
-        if FARM.dd then FARM.dd:modify({ name = 'Target: ' .. name }) end
+        FARM.paintTargets()
         guard(farmTick)
     end
     -- The farm only sees rigs that have streamed in, and a quest's targets are
@@ -4092,6 +4110,11 @@ function FARM.questTalk(npc, near, pick, done)
     local row
     local nextClick = clock() + Q.click
     deadline = clock() + Q.talk
+    -- `talk` is a no-progress window, not a total: Demon Mokuro speaks four
+    -- lines at two clicks each (the first finishes the typing) and offers his
+    -- quest ~12s in, so a flat 6s gave up mid-speech and read as "no option".
+    local hardStop = clock() + Q.talkMax
+    local lastLine
     repeat
         local df = gui and gui:FindFirstChild('DialogueFrame', true)
         local bh = df and df:FindFirstChild('ButtonHolder', true)
@@ -4103,6 +4126,15 @@ function FARM.questTalk(npc, near, pick, done)
         local adv = df and df:FindFirstChild('ClickDetector', true)
         if not row and adv and clock() >= nextClick then
             nextClick = clock() + Q.click
+            local w = {}
+            for _, t in df:GetDescendants() do
+                if t:IsA('TextLabel') and t.Name ~= 'NpcName' then w[#w + 1] = t.Text end
+            end
+            local line = table.concat(w)
+            if line ~= lastLine then
+                lastLine = line
+                deadline = math.min(clock() + Q.talk, hardStop)
+            end
             for _, c in getconnections(adv.MouseButton1Click) do pcall(c.Function) end
         end
         if not row then task.wait(0.1) end
@@ -4254,10 +4286,6 @@ end
 task.spawn(function()
     while alive do
         guard(FARM.questPass)
-        if clock() >= FARM.quest.listAt then
-            FARM.quest.listAt = clock() + FARM.quest.relist
-            guard(FARM.questRelist)
-        end
         task.wait(FARM.quest.tick)
     end
 end)
@@ -4273,11 +4301,11 @@ end)
 -- noclip stops dead at the first cliff and jitters against it. Speed keeps its
 -- collisions on purpose, so a wall is still a wall on the ground.
 local MOVE = {
-    speed    = false,  -- ships false: a Seoul toggle cannot be seeded
+    speed    = false,
     -- EXTRA studs per second, on top of the walk the humanoid is already
     -- doing, so the speed on the ground is about this plus the game's own 16.
     walk     = 48,
-    fly      = false,  -- ships false, same reason
+    fly      = false,
     flySpeed = 90,     -- the WHOLE speed: flight owns the body while it is on
     -- A Heartbeat dt is not bounded. One hitch of a second at 90 studs/s is a
     -- 90 stud jump through whatever is in between, which is the exact shape of
@@ -4293,9 +4321,9 @@ local MOVE = {
     -- knob that lets the two disagree only produces a flight that does not
     -- work; config is for taste, not for identity.
     noclip   = true,
-    sun      = false,  -- ships false, same reason
-    drown    = false,  -- ships false, same reason
-    steady   = false,  -- anti knockback / ragdoll; ships false, same reason
+    sun      = false,
+    drown    = false,
+    steady   = false,  -- anti knockback / ragdoll
 }
 local MOVE_STATE = { flying = false, speeding = false, why = 'off', noclip = false }
 
@@ -4622,11 +4650,18 @@ conns[#conns + 1] = Run.Heartbeat:Connect(function(dt)
 end)
 
 -- ── config ────────────────────────────────────────────────────────
--- Settings the user chose - colours, switches, slider values, the farm target -
--- written to JSON in the executor's workspace folder and read back on the next
--- run. The file is plain text someone may edit, so everything is checked by
--- type and clamped on the way in: a wrong shape is ignored, never applied and
--- never fatal. A missing executor filesystem is simply no persistence.
+-- Settings the user chose - colours, switches, slider values, keys, the farm
+-- targets - written to JSON in the executor's workspace folder and read back
+-- on the next run. The file is plain text someone may edit, so everything is
+-- checked by type and clamped on the way in: a wrong shape is ignored, never
+-- applied and never fatal. A missing executor filesystem is simply no
+-- persistence.
+--
+-- One load, before the menu is built, straight into the tables the features
+-- read. The menu then opens on those values. Seoul forced two phases here -
+-- values before the build, switches after it through debug.setupvalue on each
+-- pill's closure - because a toggle could not start on and nothing could
+-- repaint one; the new library does both, so none of that exists any more.
 local CONF = {
     folder  = 'ProjectSlayer',
     path    = 'ProjectSlayer/config.json',
@@ -4634,11 +4669,40 @@ local CONF = {
                     -- dragging a slider costs one write rather than sixty
     version = 1,
 }
-local confAt    = 0      -- when the last change was marked, 0 when clean
-local confSaved          -- what was read at startup, applied in two phases
--- Registered by the menu as it builds: a saved boolean can only be applied if
--- the pill that reports it can be made to agree, so the element has to be here.
-local SWITCHES = {}
+local confAt = 0     -- when the last change was marked, 0 when clean
+
+-- Every plain setting, once: where it sits in the file, the live table and
+-- field, and for a number the range its control can produce. Saving and
+-- loading both walk this list, so a setting cannot be saved without being
+-- restored, or restored into a range its control could not have produced.
+CONF.plain = {
+    { 'tuning', 'maxVisible', TUNING, 'maxVisible', 1, 300 },
+    { 'move', 'fly',       MOVE, 'fly' },
+    { 'move', 'speed',     MOVE, 'speed' },
+    { 'move', 'sun',       MOVE, 'sun' },
+    { 'move', 'drown',     MOVE, 'drown' },
+    { 'move', 'steady',    MOVE, 'steady' },
+    { 'move', 'flySpeed',  MOVE, 'flySpeed', 0, 400 },
+    { 'move', 'walk',      MOVE, 'walk', 0, 300 },
+    { 'farm', 'on',        FARM, 'on' },
+    { 'farm', 'bail',      FARM, 'bail', 0, math.huge },
+    { 'farm', 'resume',    FARM, 'resume', 0, math.huge },
+    { 'farm', 'evadeDrop', FARM, 'evadeDrop', 0, 200 },
+    { 'farm', 'cam',       FARM, 'cam' },
+    { 'farm', 'camUp',     FARM, 'camUp', 0, 100 },
+    { 'farm', 'camOut',    FARM, 'camOut', 0, 200 },
+    { 'farm', 'camSpin',   FARM, 'camSpin', 0, 90 },
+    { 'loot', 'on',        LOOT, 'on' },
+    { 'loot', 'map',       LOOT, 'map' },
+    { 'raid', 'on',        RAID, 'on' },
+    { 'raid', 'wave',      RAID, 'wave' },
+    { 'cards', 'on',       CARDS, 'on' },
+    { 'cards', 'skip',     CARDS, 'skip' },
+    { 'quest', 'on',       FARM.quest, 'on' },
+    { 'tp', 'up',          TP, 'up', 0, 60 },
+}
+-- the keys a user can rebind, by their name in the file
+CONF.keys = { 'menu', 'fly', 'speed', 'farm' }
 
 local function confFs()
     return type(isfile) == 'function' and type(readfile) == 'function'
@@ -4664,40 +4728,41 @@ local function num(v, lo, hi, dflt)
     return clamp(v, lo, hi)
 end
 
-local function dig(t, path)
-    for part in path:gmatch('[^.]+') do
-        if type(t) ~= 'table' then return nil end
-        t = t[part]
-    end
-    return t
+-- A KeyCode from its saved name. '' is a key deliberately left unbound; a name
+-- that is not a key is rejected - indexing Enum.KeyCode with one throws in
+-- Roblox, hence the pcall. Returns ok, key.
+function CONF.key(v)
+    if v == '' then return true, nil end
+    if type(v) ~= 'string' then return false end
+    local ok, k = pcall(function() return Enum.KeyCode[v] end)
+    return ok and k ~= nil, k
 end
 
 local function confDump()
-    local esp = {}
-    for key, c in CFG do
-        esp[key] = { on = c.on, showName = c.showName, showDist = c.showDist,
-                     color = hex(c.color) }
-    end
-    return {
+    local out = {
         version = CONF.version,
-        esp     = esp,
-        tuning  = { maxVisible = TUNING.maxVisible },
-        move    = { fly = MOVE.fly, speed = MOVE.speed, sun = MOVE.sun, drown = MOVE.drown,
-                    steady = MOVE.steady,
-                    flySpeed = MOVE.flySpeed, walk = MOVE.walk },
-        farm    = { on = FARM.on, bail = FARM.bail, resume = FARM.resume,
-                    evadeDrop = FARM.evadeDrop, want = farmWant,
-                    also = table.clone(FARM.also),
-                    noDodge = not FARM.evade,
-                    skills = FARM.skills,
-                    cam = FARM.cam, camUp = FARM.camUp,
-                    camOut = FARM.camOut, camSpin = FARM.camSpin },
-        loot    = { on = LOOT.on, map = LOOT.map },
-        raid    = { on = RAID.on, wave = RAID.wave },
-        cards   = { on = CARDS.on, skip = CARDS.skip },
-        quest   = { on = FARM.quest.on, want = FARM.quest.want },
-        tp      = { up = TP.up, cat = TP.cat },
+        esp     = {},
+        keys    = {},
     }
+    for _, row in CONF.plain do
+        out[row[1]] = out[row[1]] or {}
+        out[row[1]][row[2]] = row[3][row[4]]
+    end
+    for key, c in CFG do
+        out.esp[key] = { on = c.on, showName = c.showName, showDist = c.showDist,
+                         color = hex(c.color) }
+    end
+    for _, name in CONF.keys do
+        local k = UIX.keys[name]
+        out.keys[name] = k and k.Name or ''
+    end
+    out.farm.want    = farmWant
+    out.farm.also    = table.clone(FARM.also)
+    out.farm.noDodge = not FARM.evade
+    out.farm.skills  = concat(FARM.skillKeys, ',')
+    out.quest.want   = FARM.quest.want
+    out.tp.cat       = TP.cat
+    return out
 end
 
 -- The shipped values, snapshotted before anything saved is applied, so a reset
@@ -4733,125 +4798,76 @@ local function confRead()
     return type(data) == 'table' and data or nil
 end
 
--- Phase one: everything that is not a switch. Runs BEFORE the menu is built so
--- that each slider and dropdown is created already carrying its restored value
--- in its name - Seoul shows neither, and neither can be repainted from outside
--- its own callback.
-local function confValues(d)
-    if type(d) ~= 'table' then return end
-    if type(d.esp) == 'table' then
-        for key, c in CFG do
-            local saved = d.esp[key]
-            if type(saved) == 'table' then c.color = unhex(saved.color) or c.color end
-        end
-    end
-    if type(d.tuning) == 'table' then
-        TUNING.maxVisible = num(d.tuning.maxVisible, 1, 300, TUNING.maxVisible)
-    end
-    if type(d.move) == 'table' then
-        MOVE.flySpeed = num(d.move.flySpeed, 0, 400, MOVE.flySpeed)
-        MOVE.walk     = num(d.move.walk, 0, 300, MOVE.walk)
-    end
-    if type(d.farm) == 'table' then
-        FARM.bail      = num(d.farm.bail, 0, math.huge, FARM.bail)
-        FARM.resume    = num(d.farm.resume, 0, math.huge, FARM.resume)
-        FARM.evadeDrop = num(d.farm.evadeDrop, 0, 200, FARM.evadeDrop)
-        FARM.camUp     = num(d.farm.camUp, 0, 100, FARM.camUp)
-        FARM.camOut    = num(d.farm.camOut, 0, 200, FARM.camOut)
-        FARM.camSpin   = num(d.farm.camSpin, 0, 90, FARM.camSpin)
-        if type(d.farm.want) == 'string' and d.farm.want ~= '' then
-            farmWant = d.farm.want
-        end
-        -- a list of names; anything that is not a non-empty string is dropped
-        if type(d.farm.also) == 'table' then
-            table.clear(FARM.also)
-            for _, n in d.farm.also do
-                if type(n) == 'string' and n ~= '' and n ~= farmWant
-                    and not table.find(FARM.also, n) and #FARM.also < 20 then
-                    FARM.also[#FARM.also + 1] = n
-                end
-            end
-        end
-        if type(d.farm.skills) == 'string' then
-            local keys = FARM.parseSkills(d.farm.skills)
-            if keys then
-                FARM.skills, FARM.skillKeys = table.concat(keys, ','), keys
-            end
-        end
-    end
-    if type(d.quest) == 'table' and type(d.quest.want) == 'string'
-        and d.quest.want ~= '' then
-        FARM.quest.want = d.quest.want
-    end
-    if type(d.tp) == 'table' then
-        TP.up = num(d.tp.up, 0, 50, TP.up)
-        if type(d.tp.cat) == 'string' and CFG[d.tp.cat] then TP.cat = d.tp.cat end
-    end
-end
-
--- Phase two: the switches. A Seoul toggle closes over a hardcoded
--- `local state = false` that nothing in its API can seed, so a restored `true`
--- would leave the pill grey while the feature ran, and the next click would
--- turn the feature OFF while the pill went green - inverted for the session.
--- The state IS reachable: the element carries its frame, the frame's `trigger`
--- button carries the one click handler, and that handler's only boolean upvalue
--- is the state. Seed it, paint the pill the colours the handler would, and
--- prove it took by reading it back. If any step is missing - another executor,
--- a library rewrite - the switch is left OFF, which is the one state that is
--- always honest.
-local PILL_ON = Color3.new(0.14902, 1, 0)
-
-local function seed(el, want)
-    if not (el and el._instance) then return false end
-    local trig = el._instance:FindFirstChild('trigger')
-    if not trig or type(getconnections) ~= 'function' or type(debug) ~= 'table'
-        or type(debug.getupvalues) ~= 'function'
-        or type(debug.getupvalue) ~= 'function'
-        or type(debug.setupvalue) ~= 'function' then
-        return false
-    end
-    return (pcall(function()
-        local cons = getconnections(trig.MouseButton1Click)
-        local fn   = cons and cons[1] and cons[1].Function
-        if not fn then error('no handler', 0) end
-        -- Found by TYPE, never by a fixed index: an index is a property of the
-        -- library's source order, and would rot silently on the next release.
-        local idx
-        for i, v in pairs(debug.getupvalues(fn)) do
-            if type(v) == 'boolean' then
-                if idx then error('ambiguous state', 0) end
-                idx = i
-            end
-        end
-        if not idx then error('no state upvalue', 0) end
-        debug.setupvalue(fn, idx, want)
-        if debug.getupvalue(fn, idx) ~= want then error('seed did not take', 0) end
-        trig.BackgroundColor3       = want and PILL_ON or WHITE
-        trig.BackgroundTransparency = want and 0.6 or 0.95
-    end))
-end
-
--- `path` is where this switch lives in the saved file, e.g. 'esp.Boss.on'.
-local function confSwitch(path, el, set)
-    SWITCHES[path] = { el = el, set = set }
-end
-
-local function confSwitches(d)
+-- Applies a saved file to the live tables. Anything of the wrong type is
+-- skipped, so the shipped value stands. Returns how many settings it restored.
+local function confLoad(d)
     if type(d) ~= 'table' then return 0 end
     local n = 0
-    for path, sw in SWITCHES do
-        local want = dig(d, path)
-        -- The value follows the pill, never the other way round.
-        if type(want) == 'boolean' and seed(sw.el, want) then
-            sw.set(want)
+    local function sec(name) return type(d[name]) == 'table' and d[name] or nil end
+    for _, row in CONF.plain do
+        local s = sec(row[1])
+        local v = s and s[row[2]]
+        if row[5] then
+            v = num(v, row[5], row[6], nil)
+        elseif type(v) ~= 'boolean' then
+            v = nil
+        end
+        if v ~= nil then
+            row[3][row[4]] = v
             n += 1
         end
     end
+    local esp = sec('esp')
+    for key, c in CFG do
+        local saved = esp and esp[key]
+        if type(saved) == 'table' then
+            for _, field in { 'on', 'showName', 'showDist' } do
+                if type(saved[field]) == 'boolean' then
+                    c[field] = saved[field]
+                    n += 1
+                end
+            end
+            c.color = unhex(saved.color) or c.color
+        end
+    end
+    local keys = sec('keys')
+    for _, name in CONF.keys do
+        local ok, k = CONF.key(keys and keys[name])
+        -- the menu's key cannot be left unbound, or it could never come back
+        if ok and (k or name ~= 'menu') then UIX.keys[name] = k end
+    end
+    local farm = sec('farm')
+    if farm then
+        if type(farm.noDodge) == 'boolean' then FARM.evade = not farm.noDodge end
+        -- the targets are names; anything that is not a non-empty string is
+        -- dropped, and the list goes through the same setter the menu uses
+        if type(farm.want) == 'string' and farm.want ~= '' then
+            local list = { farm.want }
+            for _, x in type(farm.also) == 'table' and farm.also or {} do
+                list[#list + 1] = x
+            end
+            FARM.setTargets(list)
+        end
+        if type(farm.skills) == 'string' then
+            local parsed = FARM.parseSkills(farm.skills)
+            if parsed then FARM.skillKeys = parsed end
+        end
+    end
+    -- One range control holds both health lines, so it can only express a
+    -- resume at or above the bail. A resume below it behaves the same as one
+    -- equal to it - the bail check still holds the farm off until then - so
+    -- this changes what the control shows, never what the farm does.
+    FARM.resume = max(FARM.resume, FARM.bail)
+    local quest = sec('quest')
+    if quest and type(quest.want) == 'string' and quest.want ~= '' then
+        FARM.quest.want = quest.want
+    end
+    local tp = sec('tp')
+    if tp and type(tp.cat) == 'string' and CFG[tp.cat] then TP.cat = tp.cat end
     return n
 end
 
-confSaved = confRead()
-confValues(confSaved)
+CONF.restored = confLoad(confRead())
 
 task.spawn(function()
     while alive do
@@ -4870,6 +4886,16 @@ local function cleanup()
     -- second of the session.
     if confAt > 0 then confSave() end
     alive = false
+    -- The guis first, before anything below can run the game's Lua and cost
+    -- this thread its access to them (see UIX.apart): an unload clicked in
+    -- the menu arrives on a menu thread.
+    for c in tracked do untrack(c) end
+    clear(pool)
+    np = 0
+    -- runs our onUnload, which lands back here and returns: alive is false
+    if UIX.lib then pcall(UIX.lib.destroy, UIX.lib) end
+    gui:Destroy()
+    if genv.project == gui then genv.project = nil end
     farmDisengage(true)
     -- Unloading mid-flight must not leave the body walking through walls.
     NOCLIP.set(false)
@@ -4893,13 +4919,6 @@ local function cleanup()
     for _, x in conns do pcall(function() x:Disconnect() end) end
     clear(conns)
     for p in playerConns do unhook(p) end
-    for c in tracked do untrack(c) end
-    clear(pool)
-    np = 0
-    if uiGui then pcall(function() uiGui:Destroy() end) end
-    if genv.seoul == uiGui then genv.seoul = nil end
-    gui:Destroy()
-    if genv.project == gui then genv.project = nil end
     -- Only if it is still OURS. A re-execute can land in the same getgenv view,
     -- in which case the new run has already published its own cleanup and
     -- clearing it unconditionally would disarm the run that is taking over.
@@ -5054,10 +5073,14 @@ end)
 conns[#conns + 1] = rc
 
 -- ── ui ──────────────────────────────────────────────────────────────────────
--- Seoul quirks worked around here: a toggle cannot be seeded or resynced (so
--- every flag ships off and nothing outside the menu writes one), a slider's drag
--- ignores `min` (so min is always 0), and neither sliders nor dropdowns show
--- their own value (so each carries it in its name).
+-- The menu is a view over the tables above. Every control opens on the value
+-- its table holds and writes straight back to it; `UIX.repaint` puts a control
+-- back in step after something other than the menu changed its table - the
+-- auto quest picking a target, a config reload - without calling back into
+-- the feature. The library repaints a control from code without the switch
+-- disagreeing with the state, which is what let this lose Seoul's whole
+-- apparatus: the values carried in element names, the ship-everything-off
+-- rule, `seed` and debug.setupvalue, and the keybinds that went through them.
 local FLAGS   = { { 'Enabled', 'on' }, { 'Name', 'showName' }, { 'Distance', 'showDist' } }
 local COLOURS = {
     { 'White',  WHITE },
@@ -5070,32 +5093,423 @@ local COLOURS = {
     { 'Pink',   Color3.fromRGB(255, 140, 200) },
 }
 
-local function buildUi()
-    local seoul = loadstring(game:HttpGet(K.SEOUL))()()
-    local win = seoul:window('Project Slayer (E)')
-    if not win then return end
-    uiGui = genv.seoul
-    -- the X on the topbar destroys this gui: take everything else with it.
-    -- Deferred, so cleanup does not run inside the library's own destroy.
-    pcall(function()
-        conns[#conns + 1] = uiGui.Destroying:Connect(function()
-            task.defer(cleanup)
-        end)
-    end)
+-- The line under the title: what the script is doing right now, in words.
+-- Most specific first; a fight carries a clock, an idle state is grey. Reads
+-- state and nothing else: FARM.lootHeld() looks like a question but releases a
+-- finished hold and makes the trip home, so the status asks whether a hold is
+-- up, not whether it should end.
+function UIX.statusLine()
+    if FARM_STATE.looting or LOOT.hold then return 'Claiming loot' end
+    if farmEngaged and farmKey then return 'Farming ' .. farmKey.Name, true end
+    if RAID.active() and RAID_STATE.phase ~= 'off' then
+        return (RAID.wave and 'Wave farm: ' or 'Raid: ') .. RAID_STATE.phase, true
+    end
+    if FARM.driven() then return 'Farm: ' .. tostring(FARM_STATE.why), false, true end
+    if LOOT.map then return 'Sweeping the map for loot', true end
+    if MOVE_STATE.flying then return 'Flying' end
+    if MOVE_STATE.speeding then return 'Speeding' end
+    return 'Idle', false, true
+end
 
-    local g = win:folder('Global')
-    local sl
-    sl = g:slider({
-        name = 'Max markers: ' .. TUNING.maxVisible, min = 0, max = 300,
-        call = function(v)
-            TUNING.maxVisible = v < 1 and 1 or v
-            sl:modify({ name = 'Max markers: ' .. TUNING.maxVisible })
+local function buildUi()
+    local UI  = loadstring(game:HttpGet(K.LIB))()
+    local el  = {}
+    local syncs = {}
+    UIX.lib = UI
+
+    local win = UI:window({
+        id      = 'ProjectSlayer',
+        title   = 'Project Slayer',
+        key     = UIX.keys.menu,
+        pattern = 'hatch',
+        -- closing the menu ends the script, as it always has: a menu that is
+        -- gone cannot stop what it started
+        onClose = cleanup,
+    })
+    UIX.gui = UI.gui
+    -- and so does anything else that takes the library down - a re-run
+    -- replacing this gui by id, or the gui being destroyed from outside
+    UI:onUnload(cleanup)
+
+    local function say(msg) UI:notify({ title = 'Project Slayer', message = msg }) end
+
+    -- A control and how to put it back in step with its table.
+    local function bind(key, e, sync)
+        el[key], syncs[key] = e, sync
+        return e
+    end
+    function UIX.repaint(key)
+        local f = syncs[key]
+        if f then guard(f, el[key]) end
+    end
+    function UIX.sync()
+        for key in syncs do UIX.repaint(key) end
+    end
+
+    -- The common case: one switch over one field of one table.
+    local function switch(g, key, name, tbl, field, o, after)
+        o = o or {}
+        o.name, o.default = name, tbl[field] == true
+        o.call = function(v)
+            tbl[field] = v
+            confMark()
+            if after then after(v) end
+        end
+        return bind(key, g:toggle(o), function(e) e:set(tbl[field] == true, true) end)
+    end
+    local function number(g, key, name, tbl, field, o)
+        o.name, o.default = name, tbl[field]
+        o.call = function(v)
+            tbl[field] = v
+            confMark()
+        end
+        return bind(key, g:slider(o), function(e) e:set(tbl[field], true) end)
+    end
+    -- A toggle carrying a rebindable key. Rebinding is saved; a flip by key
+    -- while the menu is hidden says so, since nothing else on screen would.
+    local function keyed(key, word)
+        return function(k)
+            UIX.keys[key] = k
+            confMark()
+        end, function(on)
+            if not win:isOpen() then say(word .. (on and ' on' or ' off')) end
+        end
+    end
+    local function keySync(e, key, on, n)
+        e:set(on, true)
+        if n then e:setNumber(n, true) end
+        e:setKey(UIX.keys[key] or false, true)
+    end
+
+    -- ── global ──
+    local global = win:tab('Global')
+    local mv = global:group('Movement')
+    do
+        local changed, heard = keyed('fly', 'Fly')
+        bind('fly', mv:toggle({
+            name    = 'Fly',
+            icon    = 'paper-plane-tilt',
+            key     = UIX.keys.fly or false,
+            default = MOVE.fly,
+            -- the WHOLE speed: flight owns the body while it is on
+            slider  = { min = 0, max = 400, default = MOVE.flySpeed, suffix = ' st/s' },
+            changed = changed,
+            call    = function(on, speed)
+                if on ~= MOVE.fly then heard(on) end
+                MOVE.fly, MOVE.flySpeed = on, speed
+                confMark()
+            end,
+        }), function(e) keySync(e, 'fly', MOVE.fly, MOVE.flySpeed) end)
+    end
+    do
+        local changed, heard = keyed('speed', 'Speed')
+        bind('speed', mv:toggle({
+            name    = 'Speed',
+            icon    = 'lightning',
+            key     = UIX.keys.speed or false,
+            default = MOVE.speed,
+            -- signed, because it ADDS to the game's own walk rather than
+            -- replacing it
+            slider  = { min = 0, max = 300, default = MOVE.walk, prefix = '+', suffix = ' st/s' },
+            changed = changed,
+            call    = function(on, walk)
+                if on ~= MOVE.speed then heard(on) end
+                MOVE.speed, MOVE.walk = on, walk
+                confMark()
+            end,
+        }), function(e) keySync(e, 'speed', MOVE.speed, MOVE.walk) end)
+    end
+
+    local body = global:group('Protection')
+    switch(body, 'sun', 'Sun immunity', MOVE, 'sun', { icon = 'sun' }, function(v)
+        if v and MOVE.sunClear then UIX.apart(MOVE.sunClear) end
+    end)
+    switch(body, 'drown', 'Drown immunity', MOVE, 'drown', { icon = 'drop' })
+    switch(body, 'steady', 'Anti knock & rag', MOVE, 'steady', { icon = 'shield' })
+
+    local menu = global:group('Menu')
+    bind('menuKey', menu:keybind({
+        name    = 'Show menu',
+        icon    = 'eye',
+        default = UIX.keys.menu,
+        -- never unbound: a menu with no key could be hidden and never found
+        changed = function(k)
+            if k then
+                UIX.keys.menu = k
+                win:setKey(k)
+                confMark()
+            end
+            UIX.repaint('menuKey')
+        end,
+    }), function(e)
+        e:set(UIX.keys.menu, true)
+        win:setKey(UIX.keys.menu)
+    end)
+    bind('unload', menu:button({ name = 'Unload', icon = 'x', call = cleanup }))
+
+    -- ── farm ──
+    local farm = win:tab('Farm')
+    local tg = farm:group('Target')
+    -- Several kinds at once: the first pick is the main target, the rest are
+    -- extras. The picks are NAMES, so each outlives the body it was.
+    bind('targets', tg:dropdown({
+        name        = 'Targets',
+        icon        = 'crosshair-simple',
+        multi       = true,
+        options     = FARM.targetOptions,
+        describe    = function(n) return FARM.kinds[n] end,
+        default     = FARM.targetList(),
+        placeholder = 'None',
+        call        = function(list)
+            UIX.apart(FARM.setTargets, list)
             confMark()
         end,
-    })
-    g:query({
-        placeholder = 'Track by name...',
-        call = function(q)
+    }), function(e) e:set(FARM.targetList(), true) end)
+    do
+        local changed, heard = keyed('farm', 'Farm')
+        bind('farm', tg:toggle({
+            name    = 'Farm',
+            icon    = 'sword',
+            key     = UIX.keys.farm or false,
+            default = FARM.on,
+            changed = changed,
+            call    = function(on)
+                if on ~= FARM.on then heard(on) end
+                FARM.on = on
+                confMark()
+                -- act now rather than on the next scan: up to 1.5s of nothing
+                -- happening after a click reads as the farm being broken
+                UIX.apart(farmTick)
+            end,
+        }), function(e) keySync(e, 'farm', FARM.on) end)
+    end
+    local function home()
+        if not farmHome then return nil end
+        local p = farmHome.Position
+        return fmt('%d, %d, %d', floor(p.X + 0.5), floor(p.Y + 0.5), floor(p.Z + 0.5))
+    end
+    bind('home', tg:field({ name = 'Return point', icon = 'map-pin', value = home() }),
+        function(e) e:set(home()) end)
+    bind('setHome', tg:button({
+        name = 'Set return point here',
+        icon = 'house',
+        call = function()
+            local char = Me.Character
+            local hrp  = char and char:FindFirstChild('HumanoidRootPart')
+            if not hrp then
+                say('No character')
+                return
+            end
+            farmHome = hrp.CFrame
+            UIX.repaint('home')
+        end,
+    }))
+
+    local combat = farm:group('Combat')
+    -- Cast after every M1 chain, in the order picked. The list is the skill
+    -- bar the game shows, with its keys, fetched when it opens.
+    bind('skills', combat:dropdown({
+        name        = 'Skills',
+        icon        = 'lightning',
+        multi       = true,
+        ordered     = true,
+        keys        = true,
+        -- the bar is read from the game's modules, so not on this thread
+        options     = function() return UIX.apart(FARM.skillOptions) or table.clone(FARM.skillKeys) end,
+        describe    = function(k) return FARM.skillNames[k] end,
+        default     = FARM.skillKeys,
+        placeholder = 'M1 only',
+        call        = function(list)
+            FARM.skillKeys = list
+            confMark()
+        end,
+    }), function(e) e:set(FARM.skillKeys, true) end)
+    -- Both health lines on one ruler. Absolute HP, in the units the health
+    -- bar reads: what kills you is a skill landing for 250-300, which does
+    -- not shrink with your pool.
+    bind('heal', combat:range({
+        name    = 'Heal between',
+        icon    = 'heart',
+        min     = 0,
+        max     = max(farmMaxHp(), FARM.resume),
+        default = { FARM.bail, FARM.resume },
+        suffix  = ' hp',
+        call    = function(bail, resume)
+            FARM.bail, FARM.resume = bail, resume
+            confMark()
+        end,
+    }), function(e) e:set(FARM.bail, FARM.resume, true) end)
+    -- The dodge and how far it drops, as one control. The off switch is for a
+    -- trigger that keeps firing - something a weapon or effect puts on the
+    -- target that the filters do not know - which parks the body `evadeDrop`
+    -- down for the whole fight and reads as "never goes to the target".
+    bind('dodge', combat:toggle({
+        name    = 'Dodge skills',
+        icon    = 'shield',
+        default = FARM.evade,
+        slider  = { min = 0, max = 200, default = FARM.evadeDrop, suffix = ' st' },
+        call    = function(on, drop)
+            FARM.evade, FARM.evadeDrop = on, drop
+            confMark()
+        end,
+    }), function(e)
+        e:set(FARM.evade, true)
+        e:setNumber(FARM.evadeDrop, true)
+    end)
+    -- What the farm is doing, in one line: the question every "it does
+    -- nothing" report starts with, answerable without a console.
+    bind('status', combat:button({
+        name = 'Farm status',
+        icon = 'info',
+        call = function()
+            -- the lead time reads the game's combat presets
+            local msg = UIX.apart(function()
+                local st = FARM_STATE
+                local share = st.frames > 0 and floor(100 * st.dodgeFrames / st.frames + 0.5) or 0
+                return fmt('%s | dodging %d%% | last dodge: %s | loot pin: %s | lead %.2fs (%.1f studs now)',
+                    tostring(st.why), share, tostring(st.dodge or 'none'),
+                    (LOOT.spot and 'set' or 'none'), FARM.leadTime(), st.lead or 0)
+            end)
+            if msg then say(msg) end
+        end,
+    }))
+
+    -- Farming from under a target buries the body, and the default camera
+    -- has nothing to show from in there; this flies it around the target.
+    local camera = farm:group('Camera')
+    switch(camera, 'cam', 'Lock camera on target', FARM, 'cam', { icon = 'compass' })
+    number(camera, 'camUp', 'Height', FARM, 'camUp', { min = 0, max = 100, suffix = ' st' })
+    number(camera, 'camOut', 'Distance', FARM, 'camOut', { min = 0, max = 200, suffix = ' st' })
+    number(camera, 'camSpin', 'Spin', FARM, 'camSpin', { min = 0, max = 90, suffix = '°/s' })
+
+    local loot = farm:group('Loot')
+    switch(loot, 'loot', 'Claim loot', LOOT, 'on', { icon = 'coins' })
+    -- the same claimer with the range test dropped and a tour of the map under
+    -- it; `Claim loot` does not have to be on beside it
+    switch(loot, 'map', 'Sweep map for loot', LOOT, 'map', { icon = 'globe-simple' })
+
+    -- Both drive the farm and the loot run without writing either switch.
+    local raid = farm:group('Raid & dungeon')
+    switch(raid, 'raid', 'Raid farm', RAID, 'on', { icon = 'skull' })
+    switch(raid, 'wave', 'Wave farm (dungeon)', RAID, 'wave', { icon = 'arrows-clockwise' })
+    switch(raid, 'cards', 'Auto pick cards', CARDS, 'on', { icon = 'star' })
+    switch(raid, 'skip', 'Auto skip wave', CARDS, 'skip', { icon = 'play' })
+
+    -- Keeps one quest in hand and holds the farm off while it is not.
+    local quest = farm:group('Quest')
+    bind('quest', quest:dropdown({
+        name        = 'Quest',
+        icon        = 'list',
+        -- the quest table is the game's module, so not on this thread; the
+        -- givers are noted while the list is read
+        options     = function() return UIX.apart(FARM.questList) or {} end,
+        describe    = function(key) return FARM.quest.givers[key] end,
+        default     = FARM.quest.want,
+        placeholder = 'None',
+        call        = function(pick)
+            FARM.quest.want, FARM.quest.retry, FARM.quest.fails = pick, 0, 0
+            confMark()
+        end,
+    }), function(e) e:set(FARM.quest.want, true) end)
+    switch(quest, 'questOn', 'Auto quest', FARM.quest, 'on', { icon = 'check' }, function()
+        FARM.quest.retry, FARM.quest.fails = 0, 0
+        -- it drives the farm, so act on the click like Farm does
+        UIX.apart(farmTick)
+    end)
+
+    -- ── travel ──
+    -- Anything the ESP tracks is somewhere to go: pick a category and a
+    -- target, or type a name to search every category at once.
+    local travel = win:tab('Travel')
+    local tp = travel:group('Teleport')
+    local catNames, catKey = {}, {}
+    for i, key in ORDER do
+        catNames[i] = LABELS[key] or key
+        catKey[catNames[i]] = key
+    end
+    -- The farm pins us to its target every frame, so it wins any argument
+    -- with a teleport; say so rather than switch the farm off behind the
+    -- user's back.
+    local function jump(key, label)
+        local pos, stale = tpPoint(key)
+        if not pos then
+            say(tostring(label or '?') .. (tpCat(key) == 'Player'
+                and ' is too far away to locate - get closer'
+                or ' is not spawned'))
+            return
+        end
+        if not tpGo(pos) then
+            say('No character')
+            return
+        end
+        say('-> ' .. tostring(label or '?') .. (stale and ' (last known spot)' or ''))
+        if FARM.on then say('Farm is on - it will pull you back') end
+    end
+    bind('tpCat', tp:dropdown({
+        name    = 'Category',
+        icon    = 'list',
+        options = catNames,
+        default = LABELS[TP.cat] or TP.cat,
+        call    = function(pick)
+            local key = catKey[pick]
+            if not key then return end
+            TP.cat, tpKey = key, nil
+            UIX.repaint('tpTarget')
+            confMark()
+        end,
+    }), function(e) e:set(LABELS[TP.cat] or TP.cat, true) end)
+    bind('tpTarget', tp:dropdown({
+        name        = 'Target',
+        icon        = 'map-pin',
+        options     = TP.options,
+        placeholder = 'None',
+        call        = function(pick)
+            tpKey = TP.labels[pick]
+        end,
+    }), function(e) e:set(tpKey and tpName(tpKey) or nil, true) end)
+    bind('tpGo', tp:button({
+        name = 'Teleport',
+        icon = 'paper-plane-tilt',
+        call = function()
+            if not tpKey then
+                say('No target selected')
+                return
+            end
+            jump(tpKey, tpName(tpKey))
+        end,
+    }))
+    bind('tpFind', tp:textbox({
+        name        = 'Go to',
+        icon        = 'magnifying-glass',
+        placeholder = 'Any name',
+        clear       = true,
+        call        = function(text)
+            local key = tpFind(text)
+            if not key then
+                say('Nothing spawned matching ' .. tostring(text))
+                return
+            end
+            -- follow the hit into its own category, or the menu disagrees with
+            -- the target the Teleport button now holds
+            TP.cat = tpCat(key) or TP.cat
+            tpKey  = key
+            UIX.repaint('tpCat')
+            UIX.repaint('tpTarget')
+            jump(key, tpName(key))
+        end,
+    }))
+    number(tp, 'tpUp', 'Height', TP, 'up', { min = 0, max = 60, suffix = ' st' })
+
+    -- ── esp ──
+    local espT = win:tab('ESP')
+    local mk = espT:group('Markers')
+    number(mk, 'maxVisible', 'Max markers', TUNING, 'maxVisible', { min = 1, max = 300 })
+    bind('track', mk:textbox({
+        name        = 'Track',
+        icon        = 'target',
+        placeholder = 'Exact name',
+        clear       = true,
+        call        = function(q)
             if not q or q == '' then return end
             local hits = 0
             for _, x in workspace:GetDescendants() do
@@ -5104,520 +5518,56 @@ local function buildUi()
                     hits += 1
                 end
             end
-            seoul:notify(hits > 0 and fmt('Tracking %d x %s', hits, q)
-                or fmt('Nothing named %s', q))
+            say(hits > 0 and fmt('Tracking %d x %s', hits, q) or fmt('Nothing named %s', q))
         end,
-    })
-    -- Movement. Both toggles ship off, so both pills start honest, and the two
-    -- sliders carry their value in the name because Seoul never shows one.
-    g:divider('Movement')
-    confSwitch('move.fly',
-        g:toggle({ name = 'Fly (WASD, Space/Ctrl)',
-            call = function(v)
-                MOVE.fly = v
-                confMark()
-            end }),
-        function(v) MOVE.fly = v end)
-    local flySl
-    flySl = g:slider({
-        name = 'Fly speed: ' .. MOVE.flySpeed, min = 0, max = 400,
-        call = function(v)
-            MOVE.flySpeed = v
-            flySl:modify({ name = 'Fly speed: ' .. v })
-            confMark()
-        end,
-    })
-    confSwitch('move.speed',
-        g:toggle({ name = 'CFrame speed',
-            call = function(v)
-                MOVE.speed = v
-                confMark()
-            end }),
-        function(v) MOVE.speed = v end)
-    local spdSl
-    spdSl = g:slider({
-        -- signed, because it ADDS to the game's own walk rather than replacing it
-        name = 'Speed: +' .. MOVE.walk, min = 0, max = 300,
-        call = function(v)
-            MOVE.walk = v
-            spdSl:modify({ name = 'Speed: +' .. v })
-            confMark()
-        end,
-    })
-    local function sunSet(v)
-        MOVE.sun = v
-        if v and MOVE.sunClear then MOVE.sunClear() end
-    end
-    confSwitch('move.sun',
-        g:toggle({ name = 'Sun immunity',
-            call = function(v)
-                sunSet(v)
-                confMark()
-            end }),
-        sunSet)
-    confSwitch('move.drown',
-        g:toggle({ name = 'Drown immunity',
-            call = function(v)
-                MOVE.drown = v
-                confMark()
-            end }),
-        function(v) MOVE.drown = v end)
-    confSwitch('move.steady',
-        g:toggle({ name = 'Anti knock & rag',
-            call = function(v)
-                MOVE.steady = v
-                confMark()
-            end }),
-        function(v) MOVE.steady = v end)
-
-    g:button({ name = 'Unload', call = cleanup })
-
-    -- Neither a dropdown nor a button shows its own value, so each carries the
-    -- current one in its name and repaints it in the callback.
-    local farmF = win:folder('Farm')
-    -- One folder, split by dividers: it had grown to twenty-odd controls
-    -- in one run. A divider takes a bare string (see Seoul in CLAUDE.md).
-    farmF:divider('Target')
-    FARM.dd = farmF:dropdown({
-        name = 'Target: none', elements = {},
-        call = function(pick)
-            if not FARM.labels[pick] then return end
-            -- the label IS the name now, so the pick survives that body dying
-            farmWant = pick
-            -- the main target is not also an extra
-            local i = table.find(FARM.also, pick)
-            if i then table.remove(FARM.also, i) FARM.alsoPaint() end
-            farmKey  = nil
-            if farmEngaged then farmDisengage(true) end
-            FARM.dd:modify({ name = 'Target: ' .. pick })
-            confMark()
-            -- act now rather than on the next scan: up to 1.5s of nothing
-            -- happening after a click reads as the farm being broken
-            guard(farmTick)
-        end,
-    })
-    farmF:query({
-        placeholder = 'Target by name (a, b, c)...',
-        call = function(text)
-            -- Commas farm several kinds at once: the first is the main target,
-            -- the rest go to the extras, replacing them. Every term has to
-            -- match, or nothing changes and the culprit is named.
-            local keys = {}
-            for term in tostring(text or ''):gmatch('[^,]+') do
-                term = term:match('^%s*(.-)%s*$')
-                if term ~= '' then
-                    local key = farmFind(term)
-                    if not key then
-                        seoul:notify('No boss or mob matching ' .. term)
-                        return
-                    end
-                    keys[#keys + 1] = key.Name
-                end
-            end
-            if #keys == 0 then return end
-            -- keep the NAME the search landed on, not the body: typing
-            -- "bear cub" should farm bear cubs, not one particular cub
-            farmWant = keys[1]
-            if #keys > 1 then
-                table.clear(FARM.also)
-                for i = 2, #keys do
-                    if keys[i] ~= farmWant and not table.find(FARM.also, keys[i]) then
-                        FARM.also[#FARM.also + 1] = keys[i]
-                    end
-                end
-                FARM.alsoPaint()
-            end
-            farmKey  = nil
-            if farmEngaged then farmDisengage(true) end
-            FARM.dd:modify({ name = 'Target: ' .. farmWant })
-            seoul:notify('Targets: ' .. FARM.namesText())
-            confMark()
-            guard(farmTick)
-        end,
-    })
-    -- The extras. A dropdown pick ADDS the name; the button clears them all.
-    -- Neither control can show a list, so the dropdown's name carries it.
-    function FARM.alsoPaint()
-        if not FARM.alsoDd then return end
-        local n = #FARM.also
-        FARM.alsoDd:modify({ name = n == 0 and 'Also farm: none'
-            or ('Also farm: ' .. table.concat(FARM.also, ', ')) })
-    end
-    FARM.alsoDd = farmF:dropdown({
-        name = 'Also farm: none', elements = {},
-        call = function(pick)
-            if not FARM.labels[pick] then return end
-            if not farmWant then
-                -- nothing to add to: it becomes the main target
-                farmWant = pick
-                FARM.dd:modify({ name = 'Target: ' .. pick })
-            elseif pick ~= farmWant and not table.find(FARM.also, pick) then
-                FARM.also[#FARM.also + 1] = pick
-            end
-            FARM.alsoPaint()
-            confMark()
-            guard(farmTick)
-        end,
-    })
-    farmF:button({ name = 'Clear extra targets', call = function()
-        table.clear(FARM.also)
-        FARM.alsoPaint()
-        confMark()
-        guard(farmTick)
-    end })
-    confSwitch('farm.on',
-        farmF:toggle({ name = 'Farm target', call = function(v)
-            FARM.on = v
-            confMark()
-            guard(farmTick)
-        end }),
-        function(v) FARM.on = v end)
-    -- Skill keys, typed in cast order. The box cannot show its own value, so
-    -- the placeholder carries the restored one and every submit notifies.
-    farmF:query({
-        placeholder = FARM.skills ~= '' and ('Skills: ' .. FARM.skills)
-            or 'Skills in order, e.g. Z,X,C',
-        call = function(text)
-            local keys, bad = FARM.parseSkills(text)
-            if not keys then
-                seoul:notify('Not a key: ' .. tostring(bad) .. ' (letters and digits only)')
-                return
-            end
-            FARM.skills, FARM.skillKeys = table.concat(keys, ','), keys
-            seoul:notify(#keys > 0 and ('Skills: ' .. FARM.skills) or 'Skills off')
-            confMark()
-        end,
-    })
-    FARM.btn = farmF:button({
-        name = 'Return point: none',
-        call = function()
-            local char = Me.Character
-            local hrp  = char and char:FindFirstChild('HumanoidRootPart')
-            if not hrp then
-                seoul:notify('No character')
-                return
-            end
-            farmHome = hrp.CFrame
-            local p  = farmHome.Position
-            FARM.btn:modify({ name = fmt('Return point: %d, %d, %d',
-                floor(p.X + 0.5), floor(p.Y + 0.5), floor(p.Z + 0.5)) })
-            seoul:notify('Return point set')
-        end,
-    })
-
-    farmF:divider('Safety')
-    -- The resting offset gets no slider: it follows the equipped weapon, so a
-    -- control for it would be silently overwritten by the next weapon swap.
-    -- The dodge is a free choice on top, so that one keeps its slider.
-    do
-        local maxHp = farmMaxHp()
-        for _, row in { { 'Bail at', 'bail' }, { 'Resume at', 'resume' } } do
-            local hpSl
-            hpSl = farmF:slider({
-                name = row[1] .. ': ' .. FARM[row[2]] .. ' hp', min = 0, max = maxHp,
-                call = function(v)
-                    FARM[row[2]] = v
-                    hpSl:modify({ name = row[1] .. ': ' .. v .. ' hp' })
-                    confMark()
-                end,
-            })
-        end
-    end
-    -- Off switch for the dodge. A trigger that keeps firing - something a
-    -- weapon or effect puts on the target that the filters do not know -
-    -- parks the body `evadeDrop` studs down for the whole fight, and it reads
-    -- as "never goes to the target". `Farm status` names the trigger.
-    confSwitch('farm.noDodge',
-        farmF:toggle({ name = 'Never dodge',
-            call = function(v)
-                FARM.evade = not v
-                confMark()
-            end }),
-        function(v) FARM.evade = not v end)
-    local dropSl
-    dropSl = farmF:slider({
-        name = 'Dodge drop: ' .. FARM.evadeDrop, min = 0, max = 200,
-        call = function(v)
-            FARM.evadeDrop = v
-            dropSl:modify({ name = 'Dodge drop: ' .. FARM.evadeDrop })
-            confMark()
-        end,
-    })
-    -- What the farm is doing, in one line: the question every "it does
-    -- nothing" report starts with, answerable without a console.
-    farmF:button({
-        name = 'Farm status',
-        call = function()
-            local st = FARM_STATE
-            local share = st.frames > 0 and floor(100 * st.dodgeFrames / st.frames + 0.5) or 0
-            seoul:notify(fmt('%s | dodging %d%% | last dodge: %s | loot pin: %s | lead %.2fs (%.1f studs now)',
-                tostring(st.why), share, tostring(st.dodge or 'none'),
-                (LOOT.spot and 'set' or 'none'), FARM.leadTime(), st.lead or 0))
-        end,
-    })
-    farmF:divider('Camera')
-    -- Farming from under a target buries the body, and the default camera has
-    -- nothing to show from in there. This parks the camera above the target
-    -- instead, locked: while it is on, the mouse does not move the view.
-    confSwitch('farm.cam',
-        farmF:toggle({ name = 'Lock camera on target',
-            call = function(v)
-                FARM.cam = v
-                confMark()
-            end }),
-        function(v) FARM.cam = v end)
-    for _, row in { { 'Camera height', 'camUp', 100 },
-                    { 'Camera distance', 'camOut', 200 },
-                    { 'Camera spin', 'camSpin', 90 } } do
-        local camSl
-        camSl = farmF:slider({
-            name = row[1] .. ': ' .. FARM[row[2]], min = 0, max = row[3],
-            call = function(v)
-                FARM[row[2]] = v
-                camSl:modify({ name = row[1] .. ': ' .. v })
-                confMark()
-            end,
-        })
-    end
-
-    farmF:divider('Loot')
-    confSwitch('loot.on',
-        farmF:toggle({ name = 'Claim loot',
-            call = function(v)
-                LOOT.on = v
-                confMark()
-            end }),
-        function(v) LOOT.on = v end)
-    -- The same claimer with the range test dropped and a tour of the map under
-    -- it, claiming from inside the ground at every stop. It runs on its own -
-    -- `Claim loot` does not have to be on beside it.
-    confSwitch('loot.map',
-        farmF:toggle({ name = 'Sweep map for loot',
-            call = function(v)
-                LOOT.map = v
-                confMark()
-            end }),
-        function(v) LOOT.map = v end)
-    farmF:divider('Raid & dungeon')
-    -- Drives the farm and the loot run without writing either toggle, so both
-    -- pills keep telling the truth about what the user switched on.
-    confSwitch('raid.on',
-        farmF:toggle({ name = 'Raid farm',
-            call = function(v)
-                RAID.on = v
-                confMark()
-            end }),
-        function(v) RAID.on = v end)
-    -- The raid without the tour: fight every spawn, bosses too, and wait for
-    -- the next wave in place. For modes you never leave (dungeon / infinite).
-    confSwitch('raid.wave',
-        farmF:toggle({ name = 'Wave farm (dungeon)',
-            call = function(v)
-                RAID.wave = v
-                confMark()
-            end }),
-        function(v) RAID.wave = v end)
-    -- The dungeon's hands: rewards Fortune > damage > Second Wind, events the
-    -- biggest points multiplier. And the wave skip between floors.
-    confSwitch('cards.on',
-        farmF:toggle({ name = 'Auto pick cards',
-            call = function(v)
-                CARDS.on = v
-                confMark()
-            end }),
-        function(v) CARDS.on = v end)
-    confSwitch('cards.skip',
-        farmF:toggle({ name = 'Auto skip wave',
-            call = function(v)
-                CARDS.skip = v
-                confMark()
-            end }),
-        function(v) CARDS.skip = v end)
-    farmF:divider('Quest')
-    -- Keeps one quest in hand and holds the farm off while it is not; the farm
-    -- target above is still what gets killed.
-    do
-        local qDd
-        local list = FARM.questList()
-        qDd = farmF:dropdown({
-            name = 'Quest: ' .. (FARM.quest.want or 'none'),
-            elements = list,
-            call = function(pick)
-                FARM.quest.want, FARM.quest.retry, FARM.quest.fails = pick, 0, 0
-                qDd:modify({ name = 'Quest: ' .. pick })
-                -- the row text is long and the list moves; say what was taken
-                seoul:notify('Quest: ' .. pick)
-                confMark()
-            end,
-        })
-        FARM.quest.dd, FARM.quest.sig = qDd, table.concat(list, '\n')
-    end
-    confSwitch('quest.on',
-        farmF:toggle({ name = 'Auto quest',
-            call = function(v)
-                FARM.quest.on, FARM.quest.retry, FARM.quest.fails = v, 0, 0
-                confMark()
-                -- it drives the farm, so act on the click like Farm target does
-                guard(farmTick)
-            end }),
-        function(v) FARM.quest.on = v end)
-
-    -- Teleports. Same two ways in as the farm - pick from a list, or type a
-    -- name - over the same tracked set, so anything the ESP can draw is
-    -- somewhere we can go.
-    local tpF = win:folder('Teleports')
-    local function tpPaint(label)
-        if tpDd then tpDd:modify({ name = 'Target: ' .. (label or 'none') }) end
-    end
-    -- The farm pins us to its target every frame, so it wins any argument with
-    -- a teleport. Say so rather than writing FARM.on, which a Seoul toggle
-    -- cannot be resynced to.
-    local function tpJump(key, label)
-        local pos, stale = tpPoint(key)
-        if not pos then
-            seoul:notify(tostring(label or '?') .. (tpCat(key) == 'Player'
-                and ' is too far away to locate - get closer'
-                or ' is not spawned'))
-            return false
-        end
-        if not tpGo(pos) then
-            seoul:notify('No character')
-            return false
-        end
-        seoul:notify('-> ' .. tostring(label or '?')
-            .. (stale and ' (last known spot)' or ''))
-        if FARM.on then seoul:notify('Farm is on - it will pull you back') end
-        return true
-    end
-
-    local catNames, catKey = {}, {}
-    for i, key in ORDER do
-        catNames[i] = LABELS[key] or key
-        catKey[catNames[i]] = key
-    end
-    tpCatDd = tpF:dropdown({
-        name = 'Category: ' .. (LABELS[TP.cat] or TP.cat), elements = catNames,
-        call = function(pick)
-            local key = catKey[pick]
-            if not key then return end
-            TP.cat, tpKey = key, nil
-            tpCatDd:modify({ name = 'Category: ' .. pick })
-            confMark()
-            tpPaint(nil)
-            guard(tpRefresh)
-        end,
-    })
-    tpDd = tpF:dropdown({
-        name = 'Target: none', elements = {},
-        call = function(pick)
-            local key = TP.labels[pick]
-            if not key then return end
-            tpKey = key
-            tpPaint(pick)
-        end,
-    })
-    tpF:button({
-        name = 'Teleport',
-        call = function()
-            if not tpKey then
-                seoul:notify('No target selected')
-                return
-            end
-            tpJump(tpKey, tpName(tpKey))
-        end,
-    })
-    tpF:query({
-        placeholder = 'Teleport by name...',
-        call = function(text)
-            local key = tpFind(text)
-            if not key then
-                seoul:notify('Nothing spawned matching ' .. tostring(text))
-                return
-            end
-            local cat = tpCat(key)
-            -- follow the hit into its own category, or the list on screen
-            -- disagrees with the target the Teleport button now holds
-            if cat and cat ~= TP.cat then
-                TP.cat = cat
-                tpCatDd:modify({ name = 'Category: ' .. (LABELS[cat] or cat) })
-                guard(tpRefresh)
-            end
-            tpKey = key
-            local name = tpName(key)
-            tpPaint(name)
-            tpJump(key, name)
-        end,
-    })
-    local tpSl
-    tpSl = tpF:slider({
-        name = 'Height: ' .. TP.up, min = 0, max = 60,
-        call = function(v)
-            TP.up = v
-            tpSl:modify({ name = 'Height: ' .. TP.up })
-            confMark()
-        end,
-    })
-    guard(tpRefresh)
-
-    -- One folder for every category, split by dividers. Six collapsible
-    -- folders was six clicks to compare two categories; the divider carries the
-    -- name so the controls under it can stay plainly Enabled / Name / Distance.
-    local espF = win:folder('ESP')
+    }))
+    local names = {}
+    for i, pair in COLOURS do names[i] = pair[1] end
+    -- One group per category, so its three switches read plainly and the
+    -- heading says whose they are.
     for _, key in ORDER do
         local c = CFG[key]
-        -- a divider takes a bare string, unlike every other element here:
-        -- divider:__new does tostring(name), so a table renders as its address
-        espF:divider(LABELS[key] or key)
+        local g = espT:group(LABELS[key] or key)
         for _, fl in FLAGS do
-            local field = fl[2]
-            confSwitch('esp.' .. key .. '.' .. field,
-                espF:toggle({ name = fl[1],
-                    call = function(v)
-                        c[field] = v
-                        confMark()
-                    end }),
-                function(v) c[field] = v end)
+            switch(g, 'esp.' .. key .. '.' .. fl[2], fl[1], c, fl[2])
         end
-        local dd
-        local function cap()
+        local function colourName()
             for _, pair in COLOURS do
-                if pair[2] == c.color then return 'Colour: ' .. pair[1] end
+                if pair[2] == c.color then return pair[1] end
             end
-            return 'Colour: ?'
+            return nil
         end
-        local names = {}
-        for i, pair in COLOURS do names[i] = pair[1] end
-        dd = espF:dropdown({
-            name = cap(), elements = names,
-            call = function(pick)
+        bind('esp.' .. key .. '.color', g:dropdown({
+            name        = 'Colour',
+            icon        = 'palette',
+            options     = names,
+            default     = colourName(),
+            -- a colour set in the file by hand, not one of the presets
+            placeholder = 'Custom',
+            call        = function(pick)
                 for _, pair in COLOURS do
-                    if pair[1] == pick then
-                        c.color = pair[2]
-                        break
-                    end
+                    if pair[1] == pick then c.color = pair[2] end
                 end
-                dd:modify({ name = cap() })
                 confMark()
             end,
-        })
+        }), function(e) e:set(colourName(), true) end)
     end
 
-    conns[#conns + 1] = Input.InputBegan:Connect(function(i, typed)
-        if not typed and i.KeyCode == K.UI_KEY and uiGui and uiGui.Parent then
-            uiGui.Enabled = not uiGui.Enabled
+    -- The status line, four times a second; the library only writes the
+    -- label when the text changes, and a clock keeps running while it holds.
+    task.spawn(function()
+        while alive and UI.alive do
+            guard(function()
+                local text, timer, idle = UIX.statusLine()
+                win:status(text, { timer = timer, idle = idle })
+            end)
+            task.wait(0.25)
         end
     end)
 
-    -- Phase two of the config: the switches, now that every pill exists to be
-    -- seeded. A saved target is a name, so it survives the body that carried it.
-    if farmWant and FARM.dd then FARM.dd:modify({ name = 'Target: ' .. farmWant }) end
-    if FARM.alsoPaint then FARM.alsoPaint() end
-    local restored = confSwitches(confSaved)
-
-    win:ready()
-    seoul:notify(confSaved and fmt('ESP loaded - config restored (%d switches)', restored)
-        or 'ESP loaded - RightShift hides the menu')
-    return { seoul = seoul, window = win }
+    say(fmt('%s %s shows and hides the menu.',
+        CONF.restored > 0 and 'Settings restored.' or 'Loaded.', UIX.keys.menu.Name))
+    return { lib = UI, window = win, el = el, sync = UIX.sync }
 end
 
 
@@ -5632,12 +5582,11 @@ task.spawn(function()
             guard(cleanup)
             break
         end
-        -- Closing the menu ends the script. Seoul's topbar X destroys the
-        -- whole library ScreenGui, and that used to leave the farm, the raid,
-        -- the loot run and the ESP all running with no menu left to stop
-        -- them. The Destroying hook in buildUi is instant; this catches a gui
-        -- that went away any other way.
-        if uiGui and not uiGui.Parent then
+        -- The menu going away ends the script: a gui gone without its
+        -- Destroying firing - reparented to nil - would otherwise leave the
+        -- farm, the raid, the loot run and the ESP running with nothing left
+        -- to stop them. The library's onUnload is instant; this is the net.
+        if UIX.gui and not UIX.gui.Parent then
             guard(cleanup)
             break
         end
@@ -5669,9 +5618,13 @@ genv.esp = {
             or nil
         farmKey = nil
         if farmEngaged then farmDisengage(true) end
+        FARM.paintTargets()
         guard(farmTick)
     end,
-    setHome   = function(cf) farmHome = cf end,
+    setHome   = function(cf)
+        farmHome = cf
+        if UIX.repaint then UIX.repaint('home') end
+    end,
     lootHeld  = function() return LOOT.hold ~= nil end,
     loot      = LOOT,
     raid      = RAID,
@@ -5686,17 +5639,17 @@ genv.esp = {
         dump     = confDump,
         save     = confSave,
         read     = confRead,
-        -- both phases, for a reload from disk at runtime
+        -- a file's settings, applied at runtime: the tables, then the menu
         apply    = function(d)
-            confValues(d)
-            return confSwitches(d)
+            local n = confLoad(d)
+            if UIX.sync then UIX.sync() end
+            return n
         end,
         reload   = function()
             local d = confRead()
             if not d then return false end
-            confSaved = d
-            confValues(d)
-            confSwitches(d)
+            confLoad(d)
+            if UIX.sync then UIX.sync() end
             return true
         end,
     },
@@ -5704,7 +5657,10 @@ genv.esp = {
     tpTo      = tpGo,
     tpPoint   = tpPoint,
     tpFind    = tpFind,
-    tpTarget  = function(x) tpKey = x end,
+    tpTarget  = function(x)
+        tpKey = x
+        if UIX.repaint then UIX.repaint('tpTarget') end
+    end,
 }
 
 -- the esp has to survive a dead request or a library change
