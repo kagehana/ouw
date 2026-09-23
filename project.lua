@@ -718,7 +718,11 @@ local FARM = {
     -- `evadeMin`, and a 90s run with dodging off took zero damage from under.
     -- The real skills that fired (whirlpool_plant, water_wheel_drift) still
     -- dodge. Our own skills never triggered one.
-    evadeIgnore = { dash_thang_123asd = true },
+    -- `StunVFX` (5.8 studs) and `Aura` (4.5) are big parts, not skills:
+    -- StunVFX is the boss being STUNNED, logged live on Rengu 2026-09-23 -
+    -- three 5s dodges in 50s, each walking away from the best window to hit
+    -- it and letting it recover and cast (flametiger 3s after the first).
+    evadeIgnore = { dash_thang_123asd = true, StunVFX = true },
     evadeGrace = 0.6,  -- a skill's damage hitbox outlives the wind-up marker
                        -- we can see, so hold this long after the last one dies.
                        -- Watching the workspace for the hitbox itself was tried
@@ -980,12 +984,15 @@ end
 --   lead 0.105s (round trip + 0.05)  50% of 22 swings
 --   lead 0.27s                       88% of 8
 --   lead 0.41s                       61% of 18   (overshoots)
--- and round trip + wind-up = 0.276s is the best row. `leadInterp` is left as
+-- and round trip + wind-up = 0.276s is the best row. ONE-WAY + wind-up
+-- (0.248s) fits that row as well, and is what is used now: at a 206ms round
+-- trip (read live 2026-09-23) the round-trip form gave 0.43s, the row that
+-- overshoots. `leadMax` 0.35 is the backstop. `leadInterp` is left as
 -- a trim at 0. Round trip from Stats' Data Ping (includes the server frame:
 -- 55ms against GetNetworkPing's 38ms network-only), smoothed, with
 -- GetNetworkPing x2 as the fallback.
 FARM.leadInterp   = 0
-FARM.leadMax      = 0.6
+FARM.leadMax      = 0.35
 FARM.leadSmooth   = 0.15
 FARM.leadJump     = 80
 FARM.leadMaxSpeed = 40
@@ -1020,7 +1027,7 @@ end
 function FARM.leadTime()
     local now = clock()
     if FARM.rttAt and now - FARM.rttAt < 0.5 then
-        return min(FARM.leadMax, (FARM.rtt or 0) + FARM.hitDelay() + FARM.leadInterp)
+        return min(FARM.leadMax, (FARM.rtt or 0) * 0.5 + FARM.hitDelay() + FARM.leadInterp)
     end
     FARM.rttAt = now
     local ok, ms = pcall(function()
@@ -1034,7 +1041,7 @@ function FARM.leadTime()
     if rtt then
         FARM.rtt = FARM.rtt and (FARM.rtt + (rtt - FARM.rtt) * 0.3) or rtt
     end
-    return min(FARM.leadMax, (FARM.rtt or 0) + FARM.hitDelay() + FARM.leadInterp)
+    return min(FARM.leadMax, (FARM.rtt or 0) * 0.5 + FARM.hitDelay() + FARM.leadInterp)
 end
 
 -- Is this rig one the reach probe is allowed to move? Name match, because the
@@ -1532,21 +1539,172 @@ local function farmPick(name)
     local set = type(name) == 'table'
     if not set and (type(name) ~= 'string' or name == '') then return end
     local origin = farmHrp and farmHrp.Parent and farmHrp.Position
+    -- Party sync with a member here: only what is near them, or the fight
+    -- takes us away and partyFollow brings us back, round and round
+    local mate = FARM.partySync and not RAID.active() and FARM.partyMatePos
     local live, liveDist, idle
     for c, d in tracked do
         if FARM_CATS[d.cat] and typeof(c) == 'Instance' and c.Parent
             and (set and name[c.Name] or c.Name == name) then
             local rig, root, hum = farmResolve(c)
             if rig and hum and hum.Health > 0 then
-                local dist = (origin and root)
-                    and (root.Position - origin).Magnitude or math.huge
-                if not live or dist < liveDist then live, liveDist = c, dist end
+                if not FARM.isLeft(rig) and not (mate and root
+                    and (root.Position - mate).Magnitude > FARM.partyRange) then
+                    local dist = (origin and root)
+                        and (root.Position - origin).Magnitude or math.huge
+                    if not live or dist < liveDist then live, liveDist = c, dist end
+                end
             elseif not idle then
                 idle = c
             end
         end
     end
     return live or idle
+end
+
+-- Leave a SHARED boss once our credit is banked (`shareOn`, requested
+-- 2026-09-23). Measured live the same day: a boss fought alone does not cast
+-- while stunned, but `StunBypassMinAttackers = 2` is on every boss rig, so
+-- with a second attacker it skills through the stun - and those skills hit
+-- through the dodge (Fluttering Sting 247 and Kaburamaru 86 landed 53 studs
+-- down). So: with someone else on it, deal `share` of its MaxHealth and move
+-- on. The rig keeps a `DMG` folder, one NumberValue per player NAME = damage
+-- dealt, which is both our credit and the evidence someone else is fighting:
+-- an entry that GROWS, or one that appears while we watch. The entries there
+-- when we first look may be from long ago, so they count only once they grow.
+-- Nearness is not used: the bypass is about ATTACKERS, and a passer-by at a
+-- boss spawn would have sent us off after 15% for nothing.
+-- A boss we left is skipped for `shareBack` seconds, then looked at again -
+-- if the others gave up it is solo by then and we stay.
+FARM.shareOn   = false
+FARM.share     = 15    -- % of the boss's MaxHealth, dealt by us, before leaving
+FARM.shareIdle = 10    -- seconds another player's DMG growth counts as "on it"
+FARM.shareBack = 30    -- seconds before a boss we left is worth another look
+FARM.left      = setmetatable({}, { __mode = 'k' })   -- rig -> when we left
+FARM.dmgSeen   = setmetatable({}, { __mode = 'k' })   -- rig -> name -> {v, t}
+-- Party sync: fight whatever most of the party is fighting. A member is on a
+-- body when their root is within `partyNear` of it and their name is in its
+-- DMG folder - near alone would pile us onto a Civilian they walked past.
+FARM.partySync = false
+FARM.partyNear = 25
+
+function FARM.isLeft(rig)
+    local at = FARM.shareOn and rig and FARM.left[rig]
+    return type(at) == 'number' and clock() - at < FARM.shareBack
+end
+
+-- Party members in THIS server, UserId string -> their party Configuration.
+function FARM.partyIds()
+    local ids = {}
+    local svc     = RepS:FindFirstChild('Player_Service')
+    local parties = svc and svc:FindFirstChild('Parties')
+    if not parties then return ids end
+    local me = tostring(Me.UserId)
+    for _, party in parties:GetChildren() do
+        if party:FindFirstChild(me) then
+            for _, m in party:GetChildren() do
+                if m.Name ~= me and m:GetAttribute('JobId') == game.JobId then
+                    ids[m.Name] = m
+                end
+            end
+        end
+    end
+    return ids
+end
+
+-- Party member names (DMG is keyed by name), never counted as someone else.
+function FARM.partyNames()
+    local names = {}
+    for id in FARM.partyIds() do
+        local pl = Plrs:GetPlayerByUserId(tonumber(id) or 0)
+        if pl then names[pl.Name] = true end
+    end
+    return names
+end
+
+-- Is anyone outside the party fighting `rig`, and what share of its
+-- MaxHealth have WE dealt?
+function FARM.shareOf(rig, hum)
+    local now     = clock()
+    local friends = FARM.partyNames()
+    local seen    = FARM.dmgSeen[rig]
+    -- the first look is the baseline: what is there already may be old
+    local base    = seen == nil
+    if base then
+        seen = {}
+        FARM.dmgSeen[rig] = seen
+    end
+    local mine, others = 0, false
+    local dmg = rig:FindFirstChild('DMG')
+    for _, v in dmg and dmg:GetChildren() or {} do
+        if v:IsA('NumberValue') or v:IsA('IntValue') then
+            if v.Name == Me.Name then
+                mine = v.Value
+            elseif not friends[v.Name] then
+                local s = seen[v.Name]
+                if not s then
+                    seen[v.Name] = { v = v.Value, t = base and -math.huge or now }
+                elseif v.Value > s.v + 0.01 then
+                    s.v, s.t = v.Value, now
+                end
+                if now - seen[v.Name].t < FARM.shareIdle then others = true end
+            end
+        end
+    end
+    local top = hum and hum.MaxHealth or 0
+    return others, top > 0 and mine / top or 0
+end
+
+-- The engaged boss is shared and our share is banked: time to go.
+function FARM.shareDone()
+    if not FARM.shareOn or RAID.active() then return false end
+    if FARM.partySync and FARM.partyKey ~= nil and FARM.partyKey == farmKey then
+        return false
+    end
+    local d = farmKey and tracked[farmKey]
+    if not (d and d.cat == 'Boss' and farmRig and farmHum) then return false end
+    local others, share = FARM.shareOf(farmRig, farmHum)
+    FARM_STATE.share, FARM_STATE.shared = share, others
+    return others and share * 100 >= FARM.share
+end
+
+-- The live body most party members are on, nearest to us on a tie; nil when
+-- nobody in the party is fighting anything we can see.
+function FARM.partyPick()
+    FARM.partyKey = nil
+    local members = {}
+    for id, m in FARM.partyIds() do
+        local pl  = Plrs:GetPlayerByUserId(tonumber(id) or 0)
+        local r   = pl and pl.Character and pl.Character:FindFirstChild('HumanoidRootPart')
+        local pos = r and r.Position or m:GetAttribute('Position')
+        if pl and typeof(pos) == 'Vector3' then
+            members[#members + 1] = { name = pl.Name, pos = pos }
+        end
+    end
+    if #members == 0 then return end
+    local origin = farmHrp and farmHrp.Parent and farmHrp.Position
+    local best, bestN, bestD = nil, 0, math.huge
+    for c, d in tracked do
+        if FARM_CATS[d.cat] and typeof(c) == 'Instance' and c.Parent then
+            local rig, root, hum = farmResolve(c)
+            local dmg = rig and rig:FindFirstChild('DMG')
+            if dmg and root and hum and hum.Health > 0 then
+                local n = 0
+                for _, m in members do
+                    if dmg:FindFirstChild(m.name)
+                        and (root.Position - m.pos).Magnitude <= FARM.partyNear then
+                        n += 1
+                    end
+                end
+                local dist = origin and (root.Position - origin).Magnitude or 0
+                if n > bestN or (n > 0 and n == bestN and dist < bestD) then
+                    best, bestN, bestD = c, n, dist
+                end
+            end
+        end
+    end
+    FARM.partyKey = best
+    return best
 end
 
 -- Whether anything has asked the farm to fight: its own toggle, the raid, or
@@ -1595,12 +1753,32 @@ local function farmTick()
         return
     end
     local names = FARM.names()
-    if not next(names) then
+    local syncing = FARM.partySync and not RAID.active()
+        and not (FARM.quest ~= nil and FARM.quest.on)
+    local party = syncing and FARM.partyPick()
+    FARM.partyMate, FARM.partyMatePos, FARM.partyAway = nil, nil, false
+    -- nobody's fight in view: a member too far to see is travelled to first
+    local mate = syncing and not party and FARM.partyFollow and FARM.partyFollow()
+    if mate then
+        FARM_STATE.why = fmt('following %s: too far to see their fight', mate)
+        return
+    end
+    if party then
+        if party ~= farmKey then
+            if farmEngaged then farmDisengage(false) end
+            farmKey = party
+        end
+    elseif not next(names) then
         -- Cleared mid-fight: let go of the body we were under. Seoul's menu
         -- could not deselect a target, so this was only reachable through the
         -- API; the new list's Clear makes it one click.
-        FARM_STATE.why = 'no target selected'
-        if farmEngaged then farmDisengage(true) end
+        FARM_STATE.why = (FARM.partyAway
+            and fmt('going to %s next', FARM.partyMate))
+            or (FARM.partyMate
+            and fmt('with %s: the party is not fighting', FARM.partyMate))
+            or 'no target selected'
+        -- with the party, stay with it rather than going home
+        if farmEngaged then farmDisengage(not FARM.partyMate) end
         return
     end
     -- Re-resolve the name every tick. A body that died or despawned is simply
@@ -1613,7 +1791,7 @@ local function farmTick()
     -- and re-picking by name here swapped it for the nearest same-named one
     -- before we had even engaged, which put two players on one mob.
     local raidBody = RAID.active() and farmKey ~= nil and farmResolve(farmKey) ~= nil
-    if not (farmKey and typeof(farmKey) == 'Instance' and farmKey.Parent
+    if not party and not (farmKey and typeof(farmKey) == 'Instance' and farmKey.Parent
         and names[farmKey.Name] and (farmEngaged or raidBody)) then
         local picked = farmPick(names)
         if picked ~= farmKey then
@@ -1622,7 +1800,11 @@ local function farmTick()
         end
     end
     if not farmKey then
-        FARM_STATE.why = fmt('nothing named %s is tracked', FARM.namesText())
+        FARM_STATE.why = (FARM.partyAway
+            and fmt('going to %s next', FARM.partyMate))
+            or (FARM.partyMate
+            and fmt('with %s: nothing named %s near them', FARM.partyMate, FARM.namesText()))
+            or fmt('nothing named %s is tracked', FARM.namesText())
         if FARM.seekWhy then FARM.seekWhy(names) end
         return
     end
@@ -1633,6 +1815,20 @@ local function farmTick()
 
     if farmRig and farmRig.Parent and farmRoot and farmRoot.Parent
         and farmHum and farmHum.Health > 0 then
+        if FARM.shareDone() then
+            local name = farmRig.Name
+            local cf   = farmHrp and farmHrp.Parent and farmHrp.CFrame
+            FARM.left[farmRig] = clock()
+            farmDisengage(false)
+            -- held buried where we were until the next target takes the body,
+            -- not ejected by the ground beside a boss that skills through stun
+            if cf then FARM.park = FARM.buried(cf) end
+            farmKey = nil
+            FARM_STATE.why = fmt('left %s: shared, %d%% banked', name,
+                floor((FARM_STATE.share or 0) * 100))
+            FARM.tickSoon(0)
+            return
+        end
         FARM_STATE.why = 'engaged'
         return
     end
@@ -1752,8 +1948,16 @@ local function farmStep()
     -- half after a respawn, and the collision watcher stays bound to the dead
     -- humanoid for the rest of the engagement - the farm looks alive and does
     -- nothing. One property read per frame buys immediate recovery.
-    if Me.Character ~= farmChar then
+    -- Roblox sets Character a moment BEFORE the new body has its root, so a
+    -- bind on the Character change alone found no root and waited for the
+    -- 1.5s scan: measured live, 0.95s from the new body to swinging again.
+    -- Keep binding until the root is there, then act on that frame.
+    if Me.Character ~= farmChar or (farmChar and not (farmHrp and farmHrp.Parent)) then
+        local had = farmHrp
         farmBind()
+        if farmHrp and farmHrp ~= had and not farmEngaged and FARM.driven() then
+            FARM.tickSoon(0)
+        end
         if farmEngaged then
             if farmStateConn then farmStateConn:Disconnect() end
             farmStateConn = farmMe and farmMe.StateChanged:Connect(farmPhase) or nil
@@ -1964,10 +2168,19 @@ local function farmCombo()
         if not farmHum or farmHum.Health <= 0 then break end
         if Input:GetFocusedTextBox() then break end
         local code = Enum.KeyCode[name]
-        vim:SendKeyEvent(true, code, false, game)
-        task.wait(FARM.skillHold)
-        vim:SendKeyEvent(false, code, false, game)
-        task.wait(FARM.skillGap)
+        local undo = { }
+        if UIX.muteKey then undo = UIX.muteKey(code) end
+        if undo then
+            vim:SendKeyEvent(true, code, false, game)
+            task.wait(FARM.skillHold)
+            vim:SendKeyEvent(false, code, false, game)
+            -- the press reaches the binds a moment after it is sent: give the
+            -- keys back once it has been and gone
+            task.delay(0.15, function()
+                for _, f in undo do guard(f) end
+            end)
+            task.wait(FARM.skillGap)
+        end
     end
 end
 
@@ -2588,7 +2801,11 @@ end
 -- the last claim (or the kill) is `grace` old - a chest spawns after the kill
 -- and its drop spawns after the chest opens, so "nothing right now" is not yet
 -- "nothing". Reported: "it needs to claim ALL loot before teleporting ANYWHERE".
-LOOT.grace   = 1.5  -- seconds after the kill / the last claim
+-- Measured on two boss kills (2026-09-23): the World Events Chest appears
+-- 0.02-0.29s after the kill, and its drops 0.45s after the chest is claimed -
+-- disabled, which `dropsComing` holds for. After the LAST claim nothing else
+-- comes, so the old 1.5s was 1.5s of standing still after every boss.
+LOOT.grace   = 0.8  -- seconds after the kill / the last claim
 LOOT.holdMax = 15   -- cap on a hold; every successful claim restarts it
 LOOT.giveUp  = 2    -- failed runs before a prompt stops holding us here
 LOOT.hold    = nil  -- { last, cap, seen, spot, home } while armed
@@ -2769,7 +2986,11 @@ local function lootTaken(pr, deadline)
 end
 
 -- Stand on it, fire, and keep firing until it is gone or we run out of tries.
-local function lootClaim(job)
+-- Every other prompt in `jobs` within reach of the same spot is fired too:
+-- a boss's drops land in a pile, and one at a time was 0.46s each - 2.3s for
+-- five, logged live - where the prompts only need our replicated position
+-- inside their reach, not a spot each.
+local function lootClaim(job, jobs)
     local hrp = tpHrp()
     if not hrp then return false end
     for i = 1, LOOT.tries do
@@ -2782,6 +3003,16 @@ local function lootClaim(job)
         LOOT.pin()
         task.wait(i == 1 and LOOT.settle or LOOT.gap)
         pcall(fireproximityprompt, pr)
+        local here = LOOT.spot.Position
+        for _, o in jobs or {} do
+            local op = o.prompt
+            if o ~= job and op.Parent and op.Enabled and o.part.Parent
+                and (LOOT.at(op) - here).Magnitude
+                    <= (tonumber(op.MaxActivationDistance) or 0) - 1 then
+                o.cofired = true
+                pcall(fireproximityprompt, op)
+            end
+        end
         if lootTaken(pr, clock() + LOOT.gap + (tonumber(pr.HoldDuration) or 0)) then
             return true
         end
@@ -2816,7 +3047,14 @@ local function lootPass()
     FARM_STATE.looting = true
     for _, job in jobs do
         if not (LOOT.wanted() and alive) then break end
-        local ok, got = guard(lootClaim, job)
+        -- fired alongside an earlier one: give it the same window to go
+        -- before walking over to fire it again
+        local ok, got
+        if job.cofired and lootTaken(job.prompt, clock() + LOOT.gap) then
+            ok, got = true, true
+        else
+            ok, got = guard(lootClaim, job, jobs)
+        end
         if ok and got then
             FARM_STATE.looted += 1
             LOOT.sweep.claimed += 1
@@ -3924,7 +4162,7 @@ function FARM.spawnBook()
         for _, f in npcs and npcs:GetChildren() or {} do
             local b = book[f.Name]
             if b and f:FindFirstChild('BossInfo') then
-                b.cat = 'Boss'
+                b.cat, b.folder = 'Boss', f
             elseif b and b.cat ~= 'Boss' then
                 b.cat = 'Mob'
             end
@@ -3932,6 +4170,27 @@ function FARM.spawnBook()
     end
     FARM.book = book
     return book
+end
+
+-- Seconds until the boss called `n` is up: 0 when it is, nil when this is not
+-- a boss or the game does not say. A boss folder replicates map-wide with
+-- `DespawnedAt` (server time) and its BossInfo's `SpawnTime` (300 in Ouwland),
+-- read live 2026-09-23 - so a boss that is dead can be skipped without flying
+-- to its spawn to find out, which cost `seekWait` plus the trip per dead boss.
+function FARM.readyIn(n)
+    local b = FARM.spawnBook()[n]
+    local f = b and b.folder
+    if not (f and f.Parent) then return nil end
+    local rig = f:FindFirstChild(f.Name)
+    local hum = rig and rig:FindFirstChildOfClass('Humanoid')
+    if hum and hum.Health > 0 then return 0 end
+    local at   = f:GetAttribute('DespawnedAt')
+    local info = f:FindFirstChild('BossInfo')
+    local wait = info and info:GetAttribute('SpawnTime')
+    if type(at) ~= 'number' or type(wait) ~= 'number' then return nil end
+    -- a corpse still standing: the timer restarts when it despawns
+    if hum then return wait end
+    return max(0, at + wait - workspace:GetServerTimeNow())
 end
 
 -- A task's kill code to an NPC name. The code is a server-side id and is NOT
@@ -4114,7 +4373,9 @@ end
 -- farmTick's refusal line, told apart from a wait that is going to plan
 function FARM.seekWhy(names)
     local sk, name = FARM.seek(names)
-    if sk == 'here' and FARM.seekIdle then
+    if sk == 'here' and FARM.seekIdle and FARM.seekReady then
+        FARM_STATE.why = fmt("waiting at %s's spawn: back in %ds", name, math.ceil(FARM.seekReady))
+    elseif sk == 'here' and FARM.seekIdle then
         FARM_STATE.why = fmt("waiting at %s's spawn: every target is respawning", name)
     elseif sk == 'here' then
         FARM_STATE.why = fmt("waiting at %s's spawn for it to stream in", name)
@@ -4166,18 +4427,25 @@ function FARM.seekPick(names, from)
     local book = FARM.spawnBook()
     local function boss(n) return book[n] ~= nil and book[n].cat == 'Boss' end
     local best, bestDist, wait, waitKey
+    FARM.seekReady = nil
     for n in names do
         local at = spawns[n]
         if typeof(at) == 'Vector3' then
             local dist = (at - from).Magnitude
-            if not FARM.seekTried[n] and (not best or dist < bestDist) then
+            -- a boss the game says is dead is not worth the trip to look
+            local ready = FARM.readyIn(n)
+            if not FARM.seekTried[n] and not (ready and ready > FARM.seekWait)
+                and (not best or dist < bestDist) then
                 best, bestDist = n, dist
             end
-            -- the waiting spot: a boss last, then nearest
-            local key = (boss(n) and 1 or 0) + dist * 1e-7
+            -- the waiting spot: the boss back soonest, else a mob over a
+            -- boss (a mob comes back sooner), then nearest
+            local key = ready and ready * 1e-3 or (boss(n) and 1e3 or 0)
+            key += dist * 1e-7
             if not wait or key < waitKey then wait, waitKey = n, key end
         end
     end
+    if best == nil and wait then FARM.seekReady = FARM.readyIn(wait) end
     FARM.seekIdle = best == nil and wait ~= nil
     best = best or wait
     return best, best and spawns[best]
@@ -4186,6 +4454,9 @@ function FARM.seek(names)
     if type(names) == 'string' then names = { [names] = true } end
     if not (FARM.on and type(names) == 'table') or RAID.active() then return false end
     if FARM.quest and FARM.quest.on and FARM.questHere() then return false end
+    -- Party sync keeps us with the party: a trip to a far spawn would only be
+    -- undone by the next partyFollow, back and forth every few seconds
+    if FARM.partySync and FARM.partyMate then return false end
     -- The loot hold too: farmTick reaches here BEFORE its own lootHeld gate
     -- (the "nothing named X" branch), and a kill's loot is claimed before the
     -- body goes anywhere.
@@ -4238,6 +4509,58 @@ function FARM.seek(names)
     -- arrival counts once the hold lets go
     FARM.tickSoon(TP.hold + 0.05)
     return true, name
+end
+
+-- Party sync's way to a member this client cannot see. A rig only exists here
+-- inside our streaming radius, so partyPick is blind to a fight 2389 studs off
+-- (read live: qoqo's character not streamed, the party Configuration's
+-- `Position` still current) - reported as party sync not going to a friend who
+-- was farming. The party entry replicates map-wide, so go to it, buried, and
+-- let partyPick see the fight once it streams in. Nearest member first; any
+-- member within `partyFar` means we are already with the party.
+-- Returns the member's name while following, false when with the party or
+-- when the body is not ours to move.
+FARM.partyFar    = 300   -- studs from the nearest member that count as "with them"
+FARM.partyRange  = 250   -- our own list's bodies are only fought this near them
+FARM.partySettle = 3     -- seconds between trips, so a stream is waited out
+FARM.partyAt     = 0
+function FARM.partyFollow()
+    FARM.partyMate, FARM.partyMatePos, FARM.partyAway = nil, nil, false
+    local hrp = tpHrp()
+    if not hrp then return false end
+    local best, bestD, bestPos
+    for id, m in FARM.partyIds() do
+        local pl  = Plrs:GetPlayerByUserId(tonumber(id) or 0)
+        local r   = pl and pl.Character and pl.Character:FindFirstChild('HumanoidRootPart')
+        local pos = r and r.Position or m:GetAttribute('Position')
+        if pl and typeof(pos) == 'Vector3' then
+            local d = (pos - hrp.Position).Magnitude
+            if not best or d < bestD then best, bestD, bestPos = pl.Name, d, pos end
+        end
+    end
+    if not best then return false end
+    -- recorded even when we may not move: the farm reads it to stay put
+    FARM.partyMate, FARM.partyMatePos = best, bestPos
+    FARM.partyAway = bestD > FARM.partyFar
+    if not FARM.partyAway then return false end
+    -- a fight or a claim finishes first; the trip is the next tick's
+    if farmEngaged or FARM_STATE.looting or FARM.lootHeld()
+        or clock() < tpHoldUntil then
+        return false
+    end
+    if clock() < FARM.partyAt then return best end
+    FARM.partyAt = clock() + FARM.partySettle
+    task.spawn(pcall, function() Me:RequestStreamAroundAsync(bestPos) end)
+    -- same guards as the seek: no ground yet, or ground on another layer of
+    -- the map, and we sit `hide` under the member instead
+    local spot, ground = LOOT.buried(bestPos)
+    if not ground or abs(spot.Position.Y + LOOT.hide - bestPos.Y) > FARM.seekGround then
+        spot = CFrame.new(bestPos - vec3(0, LOOT.hide, 0))
+    end
+    tpGo(spot)
+    FARM.park = spot
+    FARM.tickSoon(TP.hold + 0.05)
+    return best
 end
 
 -- Gates the farm's next engagement: while we are talking to someone, while
@@ -5298,6 +5621,9 @@ CONF.plain = {
     { 'farm', 'resume',    FARM, 'resume', 0, math.huge },
     { 'farm', 'evadeDrop', FARM, 'evadeDrop', 0, 200 },
     { 'farm', 'cam',       FARM, 'cam' },
+    { 'farm', 'shareOn',   FARM, 'shareOn' },
+    { 'farm', 'share',     FARM, 'share', 5, 50 },
+    { 'farm', 'partySync', FARM, 'partySync' },
     { 'farm', 'camUp',     FARM, 'camUp', 0, 100 },
     { 'farm', 'camOut',    FARM, 'camOut', 0, 200 },
     { 'farm', 'camSpin',   FARM, 'camSpin', 0, 90 },
@@ -5762,6 +6088,31 @@ local function buildUi()
         local f = syncs[key]
         if f then guard(f, el[key]) end
     end
+    -- The farm's skill presses go through VirtualInputManager, which reaches
+    -- UserInputService - and so this menu's key binds - exactly like a typed
+    -- key. Reported: "if we set Z skill in list, and i have a keybind as Z,
+    -- it'll trigger that" - and the default bar's V and B are Fly and Speed,
+    -- so a V/B skill flipped both on every chain. A matching toggle's `key`
+    -- FIELD is blanked for the press - the library's bind reads it live - and
+    -- given back after. The field, not setKey: setKey repaints the keycap, and
+    -- this runs on the combo thread, which has run game code and so cannot
+    -- touch the menu ("lacking capability Plugin"). nil means the key is the
+    -- menu's own, which is never unbound, so that skill is not pressed at all.
+    function UIX.muteKey(code)
+        if UIX.keys.menu == code then return nil end
+        local undo = {}
+        for _, key in CONF.keys do
+            local e = el[key]
+            if key ~= 'menu' and e and e.key == code then
+                e.key = false
+                undo[#undo + 1] = function()
+                    -- unless the user rebound it meanwhile
+                    if e.key == false then e.key = code end
+                end
+            end
+        end
+        return undo
+    end
     function UIX.sync()
         for key in syncs do UIX.repaint(key) end
     end
@@ -5908,6 +6259,23 @@ local function buildUi()
         local p = farmHome.Position
         return fmt('%d, %d, %d', floor(p.X + 0.5), floor(p.Y + 0.5), floor(p.Z + 0.5))
     end
+    -- A boss with someone else on it skills through the stun (every boss
+    -- rig carries StunBypassMinAttackers = 2), so take the credit and go.
+    bind('share', tg:toggle({
+        name    = 'Leave shared bosses',
+        icon    = 'person-simple-run',
+        default = FARM.shareOn,
+        slider  = { min = 5, max = 50, default = FARM.share, suffix = '% dealt' },
+        call    = function(on, pct)
+            FARM.shareOn, FARM.share = on, pct
+            confMark()
+        end,
+    }), function(e)
+        e:set(FARM.shareOn, true)
+        e:setNumber(FARM.share, true)
+    end)
+    switch(tg, 'partySync', 'Party sync', FARM, 'partySync', { icon = 'users' },
+        function() UIX.apart(farmTick) end)
     bind('home', tg:field({ name = 'Return point', icon = 'map-pin', value = home() }),
         function(e) e:set(home()) end)
     bind('setHome', tg:button({
