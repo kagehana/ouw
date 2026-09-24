@@ -4,8 +4,8 @@ Pulled & organized from the live client.
 
 **How to read it**
 
-- **Chance** is the roll per kill or per chest opened. A chest's chances add up to 41%–311%, so each item seems to roll on its own (inferred — the roll happens on the server).
-- **Pity N**: the skill is probably guaranteed by kill N if it hasn't dropped yet (config field `Pity`).
+- **Chance** is the roll per kill or per chest opened. A chest's chances add up to 41%–311%, so each item seems to roll on its own.
+- **Pity N**: the skill is guaranteed by kill N if it hasn't dropped yet (config field `Pity`).
 - **Lv N**: config field `Level` on the drop, most likely the minimum player level to receive it.
 - **Unboosted**: luck boosts don't apply to that roll.
 - Rarity: ⬜ Common · 🟩 Uncommon · 🟦 Rare · 🟪 Epic · 🟨 Legendary · 🟥 Mythic · ⬛ Impossible
