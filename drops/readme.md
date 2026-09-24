@@ -1,6 +1,6 @@
-# Project Slayer — Boss & Chest Drops
+# Project Slayer 2 // Drops Index
 
-Pulled from the live client on 2026-09-24 (Ouwland, place `136406881576517`), from the same tables the in-game item viewer reads: `LiveConfig.get("NpcDataTable")` and `LiveConfig.get("ChestsLootTable")` in `ReplicatedStorage.CAM.Global.LiveConfig`.
+Pulled & organized from the live client.
 
 **How to read it**
 
