@@ -1,0 +1,595 @@
+PROJECT SLAYER (Ouwland, place 136406881576517) - BOSS & CHEST DROPS
+Source: live client, 2026-09-24. LiveConfig.get("NpcDataTable") / LiveConfig.get("ChestsLootTable")
+(ReplicatedStorage.CAM.Global.LiveConfig) - the same tables the in-game item viewer reads.
+
+HOW TO READ
+  Chance  = per-kill / per-open roll for that item. Chest chances sum to 41%-311%, so every item
+            appears to roll independently (inferred - the roll itself is server-side).
+  Pity N  = skill drop guaranteed by kill N if it has not dropped (config field "Pity").
+  Lv N    = config field "Level" on the drop - most likely the minimum player level to receive it.
+  unboost = "unboosted": luck boosts do not apply to this roll.
+  Chest   = chest the boss leaves on death. Its loot is in section 3.
+
+1. BOSSES  (world bosses first, then bosses, then mini bosses; "Misc" = world event spawn)
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Boss                   | Title                  | Region                 | HP   | Respawn | Exp  | Wen | Chest                                       | Drop                   | Chance | Notes                      |
++========================+========================+========================+======+=========+======+=====+=============================================+========================+========+============================+
+| Akazo                  | The Shockwave Demon    | Misc                   | 3000 | 300s    | 1000 | 450 | World Events Chest                          | Annihilation Type      | 10%    | SKILL, pity 35             |
+|                        |                        |                        |      |         |      |     |                                             | Akazo's Bottom         | 5%     |                            |
+|                        |                        |                        |      |         |      |     |                                             | Akazo's Top            | 5%     |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Datai                  | The Obi Demon          | Misc                   | 3000 | 300s    | 1000 | 450 | World Events Chest                          | Obi Charge             | 10%    | SKILL, pity 35             |
+|                        |                        |                        |      |         |      |     |                                             | Datai's Outfit         | 5%     |                            |
+|                        |                        |                        |      |         |      |     |                                             | Golden Kanzashi        | 5%     |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Domae                  | The Cryokinetic Demon  | Misc                   | 3000 | 300s    | 1000 | 450 | World Events Chest                          | Bodhisattva            | 10%    | SKILL, pity 35, night only |
+|                        |                        |                        |      |         |      |     |                                             | War Fans               | 7%     |                            |
+|                        |                        |                        |      |         |      |     |                                             | Black Lotus Crown      | 5%     |                            |
+|                        |                        |                        |      |         |      |     |                                             | Domae's Bottom         | 5%     |                            |
+|                        |                        |                        |      |         |      |     |                                             | Domae's Top            | 5%     |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Enru                   | The Dream Demon        | Misc                   | 3000 | 300s    | 1000 | 450 | World Events Chest                          | Flesh Monster          | 10%    | SKILL, pity 35             |
+|                        |                        |                        |      |         |      |     |                                             | Enru's Bottom          | 5%     |                            |
+|                        |                        |                        |      |         |      |     |                                             | Enru's Top             | 5%     |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Giyen                  | The Water Hashira      | Misc                   | 3000 | 300s    | 1000 | 450 | World Events Chest                          | Dead Calm              | 10%    | SKILL, pity 35             |
+|                        |                        |                        |      |         |      |     |                                             | Water Katana           | 5%     |                            |
+|                        |                        |                        |      |         |      |     |                                             | Water Haori            | 3%     |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Gyorei                 | The Stone Hashira      | Misc                   | 3000 | 300s    | 1000 | 450 | World Events Chest                          | Arcs of Justice        | 10%    | SKILL, pity 35             |
+|                        |                        |                        |      |         |      |     |                                             | Stone Necklace         | 5%     |                            |
+|                        |                        |                        |      |         |      |     |                                             | Stone Slayer Uniform   | 5%     |                            |
+|                        |                        |                        |      |         |      |     |                                             | Stone Haori            | 3%     |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Gyutai                 | The Blood Sickle Demon | Misc                   | 3000 | 300s    | 1000 | 450 | World Events Chest                          | Circular Slashes       | 10%    | SKILL, pity 35             |
+|                        |                        |                        |      |         |      |     |                                             | Blood Sickles          | 7%     |                            |
+|                        |                        |                        |      |         |      |     |                                             | Gyutai's Outfit        | 5%     |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Nezura                 | The Pyrokinetic Demon  | Misc                   | 3000 | 300s    | 1000 | 450 | World Events Chest                          | Blood Rupture          | 10%    | SKILL, pity 35             |
+|                        |                        |                        |      |         |      |     |                                             | Nezura's Outfit        | 5%     |                            |
+|                        |                        |                        |      |         |      |     |                                             | Bamboo Muzzle          | 3%     |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Obari                  | The Serpent King       | Misc                   | 3000 | 300s    | 1000 | 450 | World Events Chest                          | Slithering Serpent     | 10%    | SKILL, pity 35             |
+|                        |                        |                        |      |         |      |     |                                             | Serpent Katana         | 5%     |                            |
+|                        |                        |                        |      |         |      |     |                                             | Serpent Haori          | 3%     |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Reaper                 | Sonic Reaper Demon     | Misc                   | 3000 | 300s    | 1000 | 450 | World Events Chest                          | Sonido Surge           | 10%    | SKILL, pity 35, night only |
+|                        |                        |                        |      |         |      |     |                                             | Reaper’s Outfit        | 3%     |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Rengu                  | The Flame Hashira      | Misc                   | 3000 | 300s    | 1000 | 450 | World Events Chest                          | Purgatory              | 10%    | SKILL, pity 35             |
+|                        |                        |                        |      |         |      |     |                                             | Flame Katana           | 5%     |                            |
+|                        |                        |                        |      |         |      |     |                                             | Flame Slayer Uniform   | 5%     |                            |
+|                        |                        |                        |      |         |      |     |                                             | Flame Haori Style 2    | 3%     |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Saneri                 | The Wind Hashira       | Misc                   | 3000 | 300s    | 1000 | 450 | World Events Chest                          | Idaten Typhoon         | 10%    | SKILL, pity 35             |
+|                        |                        |                        |      |         |      |     |                                             | Wind Katana            | 5%     |                            |
+|                        |                        |                        |      |         |      |     |                                             | Wind Slayer Uniform    | 5%     |                            |
+|                        |                        |                        |      |         |      |     |                                             | Wind Haori             | 3%     |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Shinora                | The Insect Hashira     | Misc                   | 3000 | 300s    | 1000 | 450 | World Events Chest                          | Illusory Light         | 10%    | SKILL, pity 35             |
+|                        |                        |                        |      |         |      |     |                                             | Butterfly Hair Clip    | 5%     |                            |
+|                        |                        |                        |      |         |      |     |                                             | Insect Katana          | 5%     |                            |
+|                        |                        |                        |      |         |      |     |                                             | Insect Haori           | 3%     |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Sumari                 | The Temari Demon       | Misc                   | 3000 | 300s    | 1000 | 450 | World Events Chest                          | Spiraling Shot         | 10%    | SKILL, pity 35, night only |
+|                        |                        |                        |      |         |      |     |                                             | Sumari's Outfit        | 5%     |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Tengai                 | The Sound Hashira      | Misc                   | 3000 | 300s    | 1000 | 450 | World Events Chest                          | String Performance     | 10%    | SKILL, pity 35             |
+|                        |                        |                        |      |         |      |     |                                             | Sound Katanas          | 5%     |                            |
+|                        |                        |                        |      |         |      |     |                                             | Sound Slayer Uniform   | 5%     |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Yahari                 | The Arrow Demon        | Misc                   | 3000 | 300s    | 1000 | 450 | World Events Chest                          | Koketsu Arrow          | 10%    | SKILL, pity 35, night only |
+|                        |                        |                        |      |         |      |     |                                             | Yahari Necklace        | 5%     |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Yeti Demon             | Ancient Frost Demon    | Misc                   | 2790 | 120s    | 2025 | 600 | World Events Chest + Ice Chest + Rare Chest | Emberheart Lantern     | 25%    | SKILL, pity 10             |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Zentaro                | The Thunder King       | Misc                   | 3000 | 300s    | 1000 | 450 | World Events Chest                          | Flaming Thunder God    | 10%    | SKILL, pity 35             |
+|                        |                        |                        |      |         |      |     |                                             | Thunder Katana         | 5%     |                            |
+|                        |                        |                        |      |         |      |     |                                             | Thunder Haori          | 3%     |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Duelist Hibiki         | The Last Owner         | Misc                   | 3000 | 1s      | 500  | 250 | -                                           | (no item drops)        |        |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Fujiko                 | The Bladed Wagasa      | Final Selection Plains | 3200 | 180s    | 700  | 315 | Ice Chest                                   | Shade Breaker          | 10%    | SKILL, pity 35             |
+|                        |                        |                        |      |         |      |     |                                             | Bladed Wagasa          | 5%     | Lv 150                     |
+|                        |                        |                        |      |         |      |     |                                             | Fujiko’s Outfit        | 1.8%   | Lv 150                     |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Hand Demon             | Boss                   | Final Selection        | 1310 | 120s    | -    | 25  | -                                           | (no item drops)        |        |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Hoyuzo                 | The Sickle Reaper      | Bamboo Grove           | 1445 | 180s    | 360  | 160 | Rare Chest                                  | Scyther Vortex         | 15%    | SKILL, pity 35             |
+|                        |                        |                        |      |         |      |     |                                             | Demon Horns            | 50%    | x3                         |
+|                        |                        |                        |      |         |      |     |                                             | Sickles                | 15%    | Lv 52                      |
+|                        |                        |                        |      |         |      |     |                                             | Hiyozu's Bottom        | 3%     | Lv 52                      |
+|                        |                        |                        |      |         |      |     |                                             | Hiyozu's Top           | 3%     | Lv 52                      |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Kaiden                 | The Claw Ravager       | Bamboo Grove           | 825  | 165s    | 250  | 113 | Common Chest                                | Predator Claws         | 15%    | SKILL, pity 35             |
+|                        |                        |                        |      |         |      |     |                                             | Kaiden's Bottom        | 15%    | Lv 30                      |
+|                        |                        |                        |      |         |      |     |                                             | Kaiden's Top           | 15%    | Lv 30                      |
+|                        |                        |                        |      |         |      |     |                                             | Claws                  | 7%     | Lv 30                      |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Lost                   | The Lost Slayer        | Final Selection        | 790  | 45s     | -    | 10  | Lost Chest                                  | Shotgun Schematic      | 5%     |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Mother Bear            | Boss                   | Bamboo Grove           | 525  | 110s    | 180  | 80  | Common Chest                                | (no item drops)        |        |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Flame Trainee          | Mini Boss              | Misc                   | 600  | 120s    | 185  | 83  | Common Chest                                | (no item drops)        |        |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Insect Trainee         | Mini Boss              | Misc                   | 600  | 120s    | 185  | 83  | Common Chest                                | (no item drops)        |        |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Reaper Trainee Kuzan   | Mini Boss              | Misc                   | 1530 | 120s    | 230  | 104 | Ice Chest                                   | Traversal Reap         | 10%    | SKILL, pity 35             |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Serpent Trainee        | Mini Boss              | Misc                   | 600  | 120s    | 185  | 83  | Common Chest                                | (no item drops)        |        |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Soryu Trainee Goki     | Mini Boss              | Misc                   | 1050 | 120s    | 220  | 99  | Rare Chest                                  | Face Breaker           | 10%    | SKILL, pity 35             |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Sound Trainee          | Mini Boss              | Misc                   | 600  | 120s    | 185  | 83  | Common Chest                                | (no item drops)        |        |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Stone Trainee          | Mini Boss              | Misc                   | 600  | 120s    | 185  | 83  | Common Chest                                | Axe and Mace           | 15%    |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Tai Chi Trainee Suzume | Mini Boss              | Misc                   | 1050 | 120s    | 220  | 99  | Rare Chest                                  | Twin Harmony           | 10%    | SKILL, pity 35             |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Thunder Trainee        | Mini Boss              | Misc                   | 600  | 120s    | 185  | 83  | Common Chest                                | (no item drops)        |        |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Water Trainee Sabito   | Mini Boss              | Misc                   | 600  | 120s    | 185  | 83  | Common Chest                                | Ghost Attendant Outfit | 2%     |                            |
+|                        |                        |                        |      |         |      |     |                                             | Scarred Warding Mask   | 2%     |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Wind Trainee           | Mini Boss              | Misc                   | 600  | 120s    | 185  | 83  | Common Chest                                | (no item drops)        |        |                            |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+| Zuko                   | Mini Boss              | Windy Peak             | 300  | 90s     | 60   | 25  | Common Chest                                | Quick Draw             | 30%    | SKILL, pity 35             |
+|                        |                        |                        |      |         |      |     |                                             | Cutlass                | 20%    | Lv 10                      |
++------------------------+------------------------+------------------------+------+---------+------+-----+---------------------------------------------+------------------------+--------+----------------------------+
+
+2. REGULAR MOBS WITH ITEM DROPS  (all other mobs drop only Exp/Wen)
++---------------------+------------------+------------------------+--------+-----+------------+
+| Mob                 | Region           | Drop                   | Chance | Qty | Notes      |
++=====================+==================+========================+========+=====+============+
+| Beast Born Demon    | Mistfall Harbor  | Beast Core             | 50%    | x1  | night only |
+| Blood Hounded Demon | Mistfall Harbor  | Demon Horns            | 50%    | x1  |            |
+| Greater Demon       | Butterfly Estate | Demon Horns            | 50%    | x2  |            |
+| High Demon          | Iceveil Valley   | Demon Horns            | 50%    | x2  |            |
+| Hoyuzo Subordinate  | Bamboo Grove     | Demon Horns            | 50%    | x1  |            |
+| Lesser Demon        | Butterfly Estate | Demon Horns            | 50%    | x1  |            |
+| Mizunoto            | Mistfall Harbor  | Broken Nichirin Katana | 50%    | x1  |            |
++---------------------+------------------+------------------------+--------+-----+------------+
+
+3. CHESTS
+
+--- World Events Chest ---  (model "World Events Chest", rarity 1)
+    dropped by: Akazo, Datai, Domae, Enru, Giyen, Gyorei, Gyutai, Nezura, Obari, Reaper, Rengu, Saneri, Shinora, Sumari, Tengai, Yahari, Yeti Demon, Zentaro
++------------------------------+-------------------+-----+---------+
+| Item                         | Chance            | Qty | Notes   |
++==============================+===================+=====+=========+
+| Coin Pouch                   | 100% (guaranteed) | 2-3 |         |
+| Refinement Ore               | 100% (guaranteed) | 4-7 |         |
+| Silk Thread                  | 100% (guaranteed) | 3-5 |         |
+| Metal Scraps                 | 100% (guaranteed) | 3-5 |         |
++------------------------------+-------------------+-----+---------+
+| Metal Scraps                 | 50%               | 1   |         |
+| Silk Thread                  | 50%               | 1   |         |
+| Refinement Ore               | 20%               | 1   |         |
+| Ore                          | 5%                | 1   | unboost |
+| Stylish Haori                | 5%                | 1   |         |
+| Mythic Refinement Ore        | 4%                | 1   |         |
+| Black Dragon Armour          | 3%                | 1   |         |
+| Black Kumo Slayers Uniform   | 3%                | 1   |         |
+| Demonic Lantern              | 3%                | 1   |         |
+| Flame Haori Style 1          | 3%                | 1   |         |
+| Flame Scarf                  | 3%                | 1   |         |
+| Kintsugi  Haori              | 3%                | 1   |         |
+| Arrow Orb                    | 2%                | 1   |         |
+| Blood Manipulation Orb       | 2%                | 1   |         |
+| Cryokinesis Orb              | 2%                | 1   |         |
+| Dream Orb                    | 2%                | 1   |         |
+| Firstlight Forged Ingot      | 2%                | 1   |         |
+| Firstlight Star Ore          | 2%                | 1   |         |
+| Firstlight Weaver's Silk     | 2%                | 1   |         |
+| Nightfall Forged Ingot       | 2%                | 1   |         |
+| Nightfall Reinforced Plating | 2%                | 1   |         |
+| Nightfall Weaver's Cloth     | 2%                | 1   |         |
+| Obi Manipulation Orb         | 2%                | 1   |         |
+| Pyrokenesis Orb              | 2%                | 1   |         |
+| Reaper Orb                   | 2%                | 1   |         |
+| Refinement Guard             | 2%                | 1   |         |
+| Shockwave Orb                | 2%                | 1   |         |
+| Tamari Orb                   | 2%                | 1   |         |
++------------------------------+-------------------+-----+---------+
+
+--- Common Chest ---  (model "Common Chest", rarity 1)
+    dropped by: Flame Trainee, Insect Trainee, Kaiden, Mother Bear, Serpent Trainee, Sound Trainee, Stone Trainee, Thunder Trainee, Water Trainee Sabito, Wind Trainee, Zuko
++---------------------------+--------+-----+---------+
+| Item                      | Chance | Qty | Notes   |
++===========================+========+=====+=========+
+| Shima Koshimaki           | 12%    | 1   |         |
+| Black Kumo Haori          | 6%     | 1   |         |
+| Chained Glasses           | 6%     | 1   |         |
+| Healing Gem Necklace      | 6%     | 1   |         |
+| Hoshiko Kesa              | 6%     | 1   |         |
+| Kasumi Yukata             | 6%     | 1   |         |
+| Mask of Memories          | 6%     | 1   |         |
+| Masquerade Mask           | 6%     | 1   |         |
+| Mist Kumo Sodenashi       | 6%     | 1   |         |
+| Monster Paper Bag         | 6%     | 1   |         |
+| Mouth Dagger              | 6%     | 1   |         |
+| One-Horned Imp Mask       | 6%     | 1   |         |
+| Sweet Dreams Eye Mask     | 6%     | 1   |         |
+| Uzumaki Yukata            | 6%     | 1   |         |
+| Whispering Winds Earrings | 6%     | 1   |         |
+| Crimson Necklace          | 3%     | 1   |         |
+| Floral Warding Mask       | 3%     | 1   |         |
+| Prayer of wind Necklace   | 3%     | 1   |         |
+| Ore                       | 2.5%   | 1   | unboost |
+| Gleam Headband            | 2%     | 1   |         |
+| Monster Hood              | 2%     | 1   |         |
+| Fujiko's Lantern          | 1.5%   | 1   |         |
+| Lycoris Haori             | 1.5%   | 1   |         |
+| Arrow Orb                 | 1%     | 1   |         |
+| Blood Manipulation Orb    | 1%     | 1   |         |
+| Cryokinesis Orb           | 1%     | 1   |         |
+| Dream Orb                 | 1%     | 1   |         |
+| Obi Manipulation Orb      | 1%     | 1   |         |
+| Pyrokenesis Orb           | 1%     | 1   |         |
+| Reaper Orb                | 1%     | 1   |         |
+| Shockwave Orb             | 1%     | 1   |         |
+| Tamari Orb                | 1%     | 1   |         |
++---------------------------+--------+-----+---------+
+
+--- Rare Chest ---  (model "Rare Chest", rarity 2)
+    dropped by: Hoyuzo, Soryu Trainee Goki, Tai Chi Trainee Suzume, Yeti Demon
++---------------------------+--------+-----+---------+
+| Item                      | Chance | Qty | Notes   |
++===========================+========+=====+=========+
+| Bandaged Mask             | 12%    | 1   |         |
+| Blindfolds                | 12%    | 1   |         |
+| Clear Wind Hakama         | 12%    | 1   |         |
+| Runic Eye Mask            | 12%    | 1   |         |
+| Star Eye Patch            | 12%    | 1   |         |
+| Frozen Heart              | 10%    | 1   | unboost |
+| Healing Gem Necklace      | 9%     | 1   |         |
+| Whispering Winds Earrings | 9%     | 1   |         |
+| Spear                     | 7%     | 1   |         |
+| Deku Haori                | 6%     | 1   |         |
+| Himawari Kesa             | 6%     | 1   |         |
+| Mocking Mask              | 6%     | 1   |         |
+| Stylish Mask              | 6%     | 1   |         |
+| Ore                       | 5%     | 1   | unboost |
+| Crimson Necklace          | 4.5%   | 1   |         |
+| Floral Warding Mask       | 4.5%   | 1   |         |
+| Prayer of wind Necklace   | 4.5%   | 1   |         |
+| Battle Kimono Uniform     | 3%     | 1   |         |
+| Arrow Orb                 | 2%     | 1   |         |
+| Blood Manipulation Orb    | 2%     | 1   |         |
+| Cryokinesis Orb           | 2%     | 1   |         |
+| Dream Orb                 | 2%     | 1   |         |
+| Ice Necklace              | 2%     | 1   |         |
+| Kuzushiji Kata-Aki        | 2%     | 1   |         |
+| Mandala Kata-Aki          | 2%     | 1   |         |
+| Obi Manipulation Orb      | 2%     | 1   |         |
+| Plume Haori               | 2%     | 1   |         |
+| Pyrokenesis Orb           | 2%     | 1   |         |
+| Reaper Orb                | 2%     | 1   |         |
+| Shockwave Orb             | 2%     | 1   |         |
+| Silent Vesture Top Hat    | 2%     | 1   |         |
+| Tamari Orb                | 2%     | 1   |         |
+| White Hooded Haori        | 2%     | 1   |         |
++---------------------------+--------+-----+---------+
+
+--- Ice Chest ---  (model "Ice Chest", rarity 3)
+    dropped by: Fujiko, Reaper Trainee Kuzan, Yeti Demon
++---------------------------+--------+-----+---------+
+| Item                      | Chance | Qty | Notes   |
++===========================+========+=====+=========+
+| Healing Gem Necklace      | 12%    | 1   |         |
+| Monocle                   | 12%    | 1   |         |
+| Monster Ears              | 12%    | 1   |         |
+| Whispering Winds Earrings | 12%    | 1   |         |
+| Crimson Necklace          | 6%     | 1   |         |
+| Crimson Wrap Hakama       | 6%     | 1   |         |
+| Damask Kata-Aki           | 6%     | 1   |         |
+| Floral Warding Mask       | 6%     | 1   |         |
+| Hem stripe Kata-Aki       | 6%     | 1   |         |
+| Lantern of Despair        | 6%     | 1   |         |
+| Prayer of wind Necklace   | 6%     | 1   |         |
+| Seiun Kesa                | 6%     | 1   |         |
+| Summer Night Mask         | 6%     | 1   |         |
+| Ore                       | 5%     | 1   | unboost |
+| Wondering Obi Belt        | 3%     | 1   |         |
+| Abyssal Lantern           | 2%     | 1   |         |
+| Arrow Orb                 | 2%     | 1   |         |
+| Blood Manipulation Orb    | 2%     | 1   |         |
+| Crescent Marked Veil      | 2%     | 1   |         |
+| Cryokinesis Orb           | 2%     | 1   |         |
+| Demonic Horns             | 2%     | 1   |         |
+| Dream Orb                 | 2%     | 1   |         |
+| Midnight Blossom Cloak    | 2%     | 1   |         |
+| Moonlit Kata-Aki          | 2%     | 1   |         |
+| Obi Manipulation Orb      | 2%     | 1   |         |
+| Pyrokenesis Orb           | 2%     | 1   |         |
+| Reaper Orb                | 2%     | 1   |         |
+| Shockwave Orb             | 2%     | 1   |         |
+| Tamari Orb                | 2%     | 1   |         |
+| Two-Horned Mask           | 2%     | 1   |         |
++---------------------------+--------+-----+---------+
+
+--- Lost Chest ---  (model "Lost Chest", rarity 1)
+    dropped by: Lost
++------------------------+-------------------+-----+---------+
+| Item                   | Chance            | Qty | Notes   |
++========================+===================+=====+=========+
+| Metal Scraps           | 100% (guaranteed) | 1   |         |
++------------------------+-------------------+-----+---------+
+| Metal Scraps           | 7.5%              | 1   |         |
+| Silk Thread            | 7.5%              | 1   |         |
+| Monster Ears           | 3.6%              | 1   |         |
+| Refinement Ore         | 3%                | 1   |         |
+| Ore                    | 2.5%              | 1   | unboost |
+| Squid Beanie           | 1.8%              | 1   |         |
+| Envoy of Night Mask    | 1.5%              | 1   |         |
+| Arrow Orb              | 1%                | 1   |         |
+| Blood Manipulation Orb | 1%                | 1   |         |
+| Cryokinesis Orb        | 1%                | 1   |         |
+| Dream Orb              | 1%                | 1   |         |
+| Obi Manipulation Orb   | 1%                | 1   |         |
+| Pyrokenesis Orb        | 1%                | 1   |         |
+| Reaper Orb             | 1%                | 1   |         |
+| Shockwave Orb          | 1%                | 1   |         |
+| Tamari Orb             | 1%                | 1   |         |
+| Lost Cape              | 0.9%              | 1   |         |
+| Lost Lantern           | 0.9%              | 1   |         |
+| Lost Mask              | 0.9%              | 1   |         |
+| Lost Outfit            | 0.9%              | 1   |         |
+| Mythic Refinement Ore  | 0.6%              | 1   |         |
+| Refinement Guard       | 0.3%              | 1   |         |
++------------------------+-------------------+-----+---------+
+
+--- Sealed Cache T1 ---  (model "Sealed Chest", rarity 1)
+    Sealed Chest world event, guarded by Grove Raiders + Raid Captain
+    exp: share 0.1, level 25
++------------------------+-------------------+-----+---------+
+| Item                   | Chance            | Qty | Notes   |
++========================+===================+=====+=========+
+| Coin                   | 100% (guaranteed) | 2-4 |         |
+| Silk Thread            | 100% (guaranteed) | 1-3 |         |
+| Metal Scraps           | 100% (guaranteed) | 1-3 |         |
++------------------------+-------------------+-----+---------+
+| Coin Stack             | 45%               | 1-2 |         |
+| Health Regen Potion    | 25%               | 1   |         |
+| Stamina Regen Potion   | 20%               | 1   |         |
+| Metal Scraps           | 12.5%             | 1   |         |
+| Silk Thread            | 12.5%             | 1   |         |
+| Frozen Heart           | 10%               | 1   | unboost |
+| Bamboo Sandogasa       | 5%                | 1   |         |
+| Coin Pile              | 5%                | 1   |         |
+| Ore                    | 5%                | 1   | unboost |
+| Refinement Ore         | 5%                | 1   |         |
+| Golden Tentacle        | 3%                | 1   |         |
+| Arrow Orb              | 2%                | 1   |         |
+| Blood Manipulation Orb | 2%                | 1   |         |
+| Cryokinesis Orb        | 2%                | 1   |         |
+| Dream Orb              | 2%                | 1   |         |
+| Obi Manipulation Orb   | 2%                | 1   |         |
+| Pyrokenesis Orb        | 2%                | 1   |         |
+| Reaper Orb             | 2%                | 1   |         |
+| Shockwave Orb          | 2%                | 1   |         |
+| Tamari Orb             | 2%                | 1   |         |
+| Scythe                 | 1.75%             | 1   |         |
+| Tanto                  | 1.25%             | 1   |         |
+| Mythic Refinement Ore  | 1%                | 1   |         |
+| Refinement Guard       | 0.5%              | 1   |         |
++------------------------+-------------------+-----+---------+
+
+--- Sealed Cache T2 ---  (model "Sealed Chest", rarity 1)
+    Sealed Chest world event, guarded by Cache Lancers + Lancer Captain
+    exp: share 0.1, level 65
++------------------------+-------------------+-----+---------+
+| Item                   | Chance            | Qty | Notes   |
++========================+===================+=====+=========+
+| Coin Stack             | 100% (guaranteed) | 4-6 |         |
+| Silk Thread            | 100% (guaranteed) | 2-4 |         |
+| Metal Scraps           | 100% (guaranteed) | 2-4 |         |
++------------------------+-------------------+-----+---------+
+| Coin Pile              | 50%               | 1   |         |
+| Health Regen Elixir    | 25%               | 1   |         |
+| Metal Scraps           | 25%               | 1   |         |
+| Silk Thread            | 25%               | 1   |         |
+| Stamina Regen Elixir   | 20%               | 1   |         |
+| Frozen Heart           | 10%               | 1   | unboost |
+| Refinement Ore         | 10%               | 1   |         |
+| Golden Tentacle        | 8%                | 1-2 |         |
+| Ore                    | 5%                | 1   | unboost |
+| Overdrive Earrings     | 5%                | 1   |         |
+| Scythe                 | 3.5%              | 1   |         |
+| Tanto                  | 2.5%              | 1   |         |
+| Arrow Orb              | 2%                | 1   |         |
+| Blood Manipulation Orb | 2%                | 1   |         |
+| Cryokinesis Orb        | 2%                | 1   |         |
+| Dream Orb              | 2%                | 1   |         |
+| Mythic Refinement Ore  | 2%                | 1   |         |
+| Obi Manipulation Orb   | 2%                | 1   |         |
+| Pyrokenesis Orb        | 2%                | 1   |         |
+| Reaper Orb             | 2%                | 1   |         |
+| Shockwave Orb          | 2%                | 1   |         |
+| Tamari Orb             | 2%                | 1   |         |
+| Refinement Guard       | 1%                | 1   |         |
++------------------------+-------------------+-----+---------+
+
+--- Sealed Cache T3 ---  (model "Sealed Chest", rarity 1)
+    Sealed Chest world event, guarded by Cache Prowlers + Prowler Captain
+    exp: share 0.1, level 150
++------------------------+-------------------+-----+---------+
+| Item                   | Chance            | Qty | Notes   |
++========================+===================+=====+=========+
+| Coin Stack             | 100% (guaranteed) | 4-7 |         |
+| Refinement Ore         | 100% (guaranteed) | 4-7 |         |
+| Silk Thread            | 100% (guaranteed) | 3-5 |         |
+| Metal Scraps           | 100% (guaranteed) | 3-5 |         |
++------------------------+-------------------+-----+---------+
+| Coin Pile              | 60%               | 1   |         |
+| Metal Scraps           | 50%               | 1   |         |
+| Silk Thread            | 50%               | 1   |         |
+| Health Regen Elixir    | 25%               | 1-2 |         |
+| Coin Pouch             | 20%               | 1   |         |
+| Refinement Ore         | 20%               | 1   |         |
+| Stamina Regen Elixir   | 20%               | 1-2 |         |
+| Golden Tentacle        | 12%               | 2-4 |         |
+| Frozen Heart           | 10%               | 1   | unboost |
+| Scythe                 | 7%                | 1   |         |
+| Ore                    | 5%                | 1   | unboost |
+| Tanto                  | 5%                | 1   |         |
+| Mythic Refinement Ore  | 4%                | 1   |         |
+| Classic Straw Hat      | 3%                | 1   |         |
+| Arrow Orb              | 2%                | 1   |         |
+| Blood Manipulation Orb | 2%                | 1   |         |
+| Cryokinesis Orb        | 2%                | 1   |         |
+| Dream Orb              | 2%                | 1   |         |
+| Obi Manipulation Orb   | 2%                | 1   |         |
+| Pyrokenesis Orb        | 2%                | 1   |         |
+| Reaper Orb             | 2%                | 1   |         |
+| Refinement Guard       | 2%                | 1   |         |
+| Shockwave Orb          | 2%                | 1   |         |
+| Tamari Orb             | 2%                | 1   |         |
++------------------------+-------------------+-----+---------+
+
+--- Snow Chest ---  (model "Snow Chest", rarity 1)
+    Iceveil Valley snow chest (config "snow-chest-v2"; spawn server-side, not verified)
+    exp: share 0.03, level 110
++------------------------+-------------------+-----+---------+
+| Item                   | Chance            | Qty | Notes   |
++========================+===================+=====+=========+
+| Coin Stack             | 100% (guaranteed) | 1-3 |         |
+| Refinement Ore         | 100% (guaranteed) | 2-3 |         |
+| Silk Thread            | 100% (guaranteed) | 1-2 |         |
+| Metal Scraps           | 100% (guaranteed) | 1-2 |         |
++------------------------+-------------------+-----+---------+
+| Coin Pile              | 40%               | 1   |         |
+| Metal Scraps           | 17.5%             | 1   |         |
+| Silk Thread            | 17.5%             | 1   |         |
+| Health Regen Elixir    | 12%               | 1   |         |
+| Stamina Regen Elixir   | 10%               | 1   |         |
+| Coin Pouch             | 7%                | 1   |         |
+| Refinement Ore         | 7%                | 1   |         |
+| Ore                    | 2%                | 1   | unboost |
+| Mythic Refinement Ore  | 1.4%              | 1   |         |
+| Refinement Guard       | 0.7%              | 1   |         |
+| Arrow Orb              | 0.667%            | 1   |         |
+| Blood Manipulation Orb | 0.667%            | 1   |         |
+| Cryokinesis Orb        | 0.667%            | 1   |         |
+| Dream Orb              | 0.667%            | 1   |         |
+| Obi Manipulation Orb   | 0.667%            | 1   |         |
+| Pyrokenesis Orb        | 0.667%            | 1   |         |
+| Reaper Orb             | 0.667%            | 1   |         |
+| Shockwave Orb          | 0.667%            | 1   |         |
+| Tamari Orb             | 0.667%            | 1   |         |
++------------------------+-------------------+-----+---------+
+
+--- Ouwigahara Chest ---  (model "Ouwigahara Chest", rarity 1)
+    Ouwigahara dungeon - opening gated on OuwigaharaPoints (end-of-run chest, inferred)
++------------------------------+-------------------+-------+---------+
+| Item                         | Chance            | Qty   | Notes   |
++==============================+===================+=======+=========+
+| Coin Pouch                   | 100% (guaranteed) | 1     |         |
+| Silk Thread                  | 100% (guaranteed) | 10-20 |         |
+| Metal Scraps                 | 100% (guaranteed) | 10-20 |         |
+| Stamina Regen Potion         | 100% (guaranteed) | 1     |         |
+| Health Regen Potion          | 100% (guaranteed) | 1     |         |
+| Refinement Ore               | 100% (guaranteed) | 15-25 |         |
++------------------------------+-------------------+-------+---------+
+| Black Monster Ears           | 12%               | 1     |         |
+| Eye Sash                     | 12%               | 1     |         |
+| Mimic Necklace               | 12%               | 1     |         |
+| Azure Necklace               | 6%                | 1     |         |
+| Flame Veil                   | 6%                | 1     |         |
+| Haki Haori                   | 6%                | 1     |         |
+| Sargent’s Kesa               | 6%                | 1     |         |
+| Bokashi-Zome Kata-Aki        | 5%                | 1     |         |
+| Demonic Horns II             | 5%                | 1     |         |
+| Firstlight Forged Ingot      | 5%                | 1     |         |
+| Firstlight Star Ore          | 5%                | 1     |         |
+| Firstlight Weaver's Silk     | 5%                | 1     |         |
+| Nichirin Lantern             | 5%                | 1     |         |
+| Nightfall Forged Ingot       | 5%                | 1     |         |
+| Nightfall Reinforced Plating | 5%                | 1     |         |
+| Nightfall Weaver's Cloth     | 5%                | 1     |         |
+| Ore                          | 5%                | 1     | unboost |
+| Red Oni Mask                 | 5%                | 1     |         |
+| Silver Fang Mask             | 5%                | 1     |         |
+| Straw Fringe Hat             | 5%                | 1     |         |
+| Todoroki Koshimaki           | 5%                | 1     |         |
+| Yang Fur Kesa                | 5%                | 1     |         |
+| Azure Drape Scarf            | 3%                | 1     |         |
+| Flame Amigasa                | 3%                | 1     |         |
+| Fractured Web Kata-Aki       | 3%                | 1     |         |
++------------------------------+-------------------+-------+---------+
+
+--- Ouwigahara Cache ---  (model "Ouwigahara Chest", rarity 1)
+    Ouwigahara dungeon cache (spawn point server-side, not verified)
++------------------------------+-------------------+-----+-----------------------+
+| Item                         | Chance            | Qty | Notes                 |
++==============================+===================+=====+=======================+
+| Coin Pouch                   | 100% (guaranteed) | 1-3 | split between openers |
+| Coin                         | 100% (guaranteed) | 4-6 | split between openers |
++------------------------------+-------------------+-----+-----------------------+
+| Black Monster Ears           | 12%               | 1   |                       |
+| Eye Sash                     | 12%               | 1   |                       |
+| Mimic Necklace               | 12%               | 1   |                       |
+| Azure Necklace               | 6%                | 1   |                       |
+| Flame Veil                   | 6%                | 1   |                       |
+| Haki Haori                   | 6%                | 1   |                       |
+| Sargent’s Kesa               | 6%                | 1   |                       |
+| Bokashi-Zome Kata-Aki        | 5%                | 1   |                       |
+| Demonic Horns II             | 5%                | 1   |                       |
+| Firstlight Forged Ingot      | 5%                | 1   |                       |
+| Firstlight Star Ore          | 5%                | 1   |                       |
+| Firstlight Weaver's Silk     | 5%                | 1   |                       |
+| Nichirin Lantern             | 5%                | 1   |                       |
+| Nightfall Forged Ingot       | 5%                | 1   |                       |
+| Nightfall Reinforced Plating | 5%                | 1   |                       |
+| Nightfall Weaver's Cloth     | 5%                | 1   |                       |
+| Ore                          | 5%                | 1   | unboost               |
+| Red Oni Mask                 | 5%                | 1   |                       |
+| Silver Fang Mask             | 5%                | 1   |                       |
+| Straw Fringe Hat             | 5%                | 1   |                       |
+| Todoroki Koshimaki           | 5%                | 1   |                       |
+| Yang Fur Kesa                | 5%                | 1   |                       |
+| Azure Drape Scarf            | 3%                | 1   |                       |
+| Flame Amigasa                | 3%                | 1   |                       |
+| Fractured Web Kata-Aki       | 3%                | 1   |                       |
++------------------------------+-------------------+-----+-----------------------+
+
+--- Ouwigahara Deep Cache ---  (model "Ouwigahara Chest", rarity 1)
+    Ouwigahara dungeon, deeper cache - double odds of the regular Cache (spawn not verified)
++------------------------------+-------------------+-----+-----------------------+
+| Item                         | Chance            | Qty | Notes                 |
++==============================+===================+=====+=======================+
+| Coin Pouch                   | 100% (guaranteed) | 2-4 | split between openers |
+| Coin                         | 100% (guaranteed) | 6-8 | split between openers |
+| Coin Stack                   | 100% (guaranteed) | 2-3 | split between openers |
++------------------------------+-------------------+-----+-----------------------+
+| Black Monster Ears           | 24%               | 1   |                       |
+| Eye Sash                     | 24%               | 1   |                       |
+| Mimic Necklace               | 24%               | 1   |                       |
+| Azure Necklace               | 12%               | 1   |                       |
+| Flame Veil                   | 12%               | 1   |                       |
+| Haki Haori                   | 12%               | 1   |                       |
+| Sargent’s Kesa               | 12%               | 1   |                       |
+| Bokashi-Zome Kata-Aki        | 10%               | 1   |                       |
+| Demonic Horns II             | 10%               | 1   |                       |
+| Nichirin Lantern             | 10%               | 1   |                       |
+| Red Oni Mask                 | 10%               | 1   |                       |
+| Silver Fang Mask             | 10%               | 1   |                       |
+| Straw Fringe Hat             | 10%               | 1   |                       |
+| Todoroki Koshimaki           | 10%               | 1   |                       |
+| Yang Fur Kesa                | 10%               | 1   |                       |
+| Azure Drape Scarf            | 6%                | 1   |                       |
+| Flame Amigasa                | 6%                | 1   |                       |
+| Fractured Web Kata-Aki       | 6%                | 1   |                       |
+| Firstlight Forged Ingot      | 5%                | 1   |                       |
+| Firstlight Star Ore          | 5%                | 1   |                       |
+| Firstlight Weaver's Silk     | 5%                | 1   |                       |
+| Nightfall Forged Ingot       | 5%                | 1   |                       |
+| Nightfall Reinforced Plating | 5%                | 1   |                       |
+| Nightfall Weaver's Cloth     | 5%                | 1   |                       |
+| Ore                          | 5%                | 1   | unboost               |
++------------------------------+-------------------+-----+-----------------------+
+
+NOT INCLUDED / CAVEATS
+  - Test-region NPCs (Scythe Boss, Spear Boss, Tai Chi Boss, Dummy, ...) are dev dummies and are omitted.
+  - Spawn locations of Snow Chest and the Ouwigahara caches are decided server-side; labels above are inferred.
+  - "pieces" on a guaranteed item = the Coin/Coin Pouch amount is split per opener (inferred from the flag name).
