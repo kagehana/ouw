@@ -271,7 +271,7 @@ Regular mobs that drop items. Every other mob drops only Exp and Wen.
 
 ### Sealed Cache T1
 
-<img src="icons/120968289236022.png" width="64" height="64"><br>Sealed Chest world event, guarded by Grove Raiders and a Raid Captain.<br>Exp: share 0.1, level 25.
+<img src="icons/120968289236022.png" width="64" height="64"><br>Sealed Chest world event,<br>Exp: share 0.1, level 25.
 
 | | Item | Rarity | Chance | Qty | Notes |
 |:-:|---|---|--:|--:|---|
@@ -305,7 +305,7 @@ Regular mobs that drop items. Every other mob drops only Exp and Wen.
 
 ### Sealed Cache T2
 
-<img src="icons/123841250049403.png" width="64" height="64"><br>Sealed Chest world event, guarded by Cache Lancers and a Lancer Captain.<br>Exp: share 0.1, level 65.
+<img src="icons/123841250049403.png" width="64" height="64"><br>Sealed Chest world event,<br>Exp: share 0.1, level 65.
 
 | | Item | Rarity | Chance | Qty | Notes |
 |:-:|---|---|--:|--:|---|
@@ -338,7 +338,7 @@ Regular mobs that drop items. Every other mob drops only Exp and Wen.
 
 ### Sealed Cache T3
 
-<img src="icons/78602976034188.png" width="64" height="64"><br>Sealed Chest world event, guarded by Cache Prowlers and a Prowler Captain.<br>Exp: share 0.1, level 150.
+<img src="icons/78602976034188.png" width="64" height="64"><br>Sealed Chest world event,<br>Exp: share 0.1, level 150.
 
 | | Item | Rarity | Chance | Qty | Notes |
 |:-:|---|---|--:|--:|---|
@@ -373,7 +373,7 @@ Regular mobs that drop items. Every other mob drops only Exp and Wen.
 
 ### Snow Chest
 
-<img src="icons/104396278374710.png" width="64" height="64"><br>Iceveil Valley snow chest (config `snow-chest-v2`). Where it spawns is decided on the server (not verified).<br>Exp: share 0.03, level 110.
+<img src="icons/104396278374710.png" width="64" height="64"><br>Iceveil Valley snow chest (config `snow-chest-v2`).<br>Exp: share 0.03, level 110.
 
 | | Item | Rarity | Chance | Qty | Notes |
 |:-:|---|---|--:|--:|---|
@@ -403,7 +403,7 @@ Regular mobs that drop items. Every other mob drops only Exp and Wen.
 
 ### Ouwigahara Chest
 
-<img src="icons/78877113661703.png" width="64" height="64"><br>Ouwigahara dungeon. Opening it costs `OuwigaharaPoints` (probably the end-of-run chest; inferred).
+<img src="icons/78877113661703.png" width="64" height="64"><br>Ouwigahara dungeon. Opening it costs `OuwigaharaPoints`.
 
 | | Item | Rarity | Chance | Qty | Notes |
 |:-:|---|---|--:|--:|---|
@@ -441,7 +441,7 @@ Regular mobs that drop items. Every other mob drops only Exp and Wen.
 
 ### Ouwigahara Cache
 
-<img src="icons/78877113661703.png" width="64" height="64"><br>Ouwigahara dungeon cache. Where it spawns is decided on the server (not verified).
+<img src="icons/78877113661703.png" width="64" height="64"><br>Ouwigahara dungeon cache.
 
 | | Item | Rarity | Chance | Qty | Notes |
 |:-:|---|---|--:|--:|---|
@@ -475,7 +475,7 @@ Regular mobs that drop items. Every other mob drops only Exp and Wen.
 
 ### Ouwigahara Deep Cache
 
-<img src="icons/78877113661703.png" width="64" height="64"><br>Ouwigahara dungeon, deeper cache: double the odds of the regular Cache. Where it spawns is not verified.
+<img src="icons/78877113661703.png" width="64" height="64"><br>Ouwigahara dungeon, deeper cache: double the odds of the regular Cache.
 
 | | Item | Rarity | Chance | Qty | Notes |
 |:-:|---|---|--:|--:|---|
